@@ -1,7 +1,7 @@
 (function(){
 "use strict";
-function blankForm(){return {showId:"",newTitle:"",theatre:"",location:"",date:"",slot:"eve",cast:[],origin:"blank",scanId:null,pages:0,seat:"",note:"",msg:"",scanMsg:"",busy:false};}
-var S={user:null,shows:new Map(),perfs:new Map(),diary:new Map(),ready:false,fetched:new Set(),ent:new Map(),entAsked:new Set(),q:"",form:blankForm(),auth:{email:"",step:"email",msg:""}};
+function blankForm(){return {showId:"",newTitle:"",theatre:"",location:"",date:"",slot:"eve",cast:[],origin:"blank",scanId:null,pages:0,seat:"",note:"",msg:"",scanMsg:"",busy:false,dateGuess:"",unsure:false,draftId:null,helpOpen:false,paste:"",pasteMsg:"",dirty:false,nearText:""};}
+var S={user:null,shows:new Map(),perfs:new Map(),diary:new Map(),drafts:new Map(),ready:false,fetched:new Set(),ent:new Map(),entAsked:new Set(),q:"",form:blankForm(),auth:{email:"",step:"email",msg:""}};
 var STATUSES=[["billed","As billed"],["understudy","Understudy"],["standby","Standby"],["swing","Swing"],["alternate","Alternate"]];
 var $view=document.getElementById("view"),$banner=document.getElementById("banner");
 
@@ -109,7 +109,8 @@ async function api(path,opts){
   return data;
 }
 function send(method,path,body){return api(path,{method:method,headers:{"content-type":"application/json"},body:JSON.stringify(body||{})});}
-function takeMe(me){S.user=me.user;S.signIn=me.signIn||"code";S.diary=new Map();
+function takeMe(me){S.user=me.user;S.signIn=me.signIn||"code";S.diary=new Map();S.drafts=new Map();
+  (me.drafts||[]).forEach(function(d){S.drafts.set(d.id,d);});
   (me.attendance||[]).forEach(function(a){S.diary.set(a.perfId,a);});
   (me.performances||[]).forEach(function(p){S.perfs.set(p.id,p);});}
 async function boot(){
@@ -215,6 +216,7 @@ function viewMe(){
       h("p",{class:"muted",style:"margin:0;max-width:60ch",text:"Add the date you saw a show and keep the cast from that performance: principals, understudies, swings. Then follow anyone you've seen across every night in the archive."}),
       h("div",{class:"row"},h("a",{class:"btn primary",href:"#/add",text:"Add a night"}),
         S.user||S.signIn==="access"?null:h("a",{class:"btn",href:"#/sign-in",text:"Sign in"}),h("a",{class:"btn ghost",href:"#/archive",text:"Browse the archive"}))));
+    wrap.push(draftsSection());
     var recent=allPerfs().slice(0,5);
     if(recent.length) wrap.push(section("Just logged",nightList(recent,""),h("a",{href:"#/archive",text:"See all"})));
     return wrap;
@@ -231,6 +233,7 @@ function viewMe(){
     h("div",{class:"card stat"},h("b",{text:String(subs.length)}),h("span",{text:subs.length===1?"understudy you saw go on":"understudies you saw go on"})),
     h("div",{class:"card stat"},h("b",{text:String(cross.length)}),h("span",{text:cross.length===1?"performer seen in more than one role":"performers seen in more than one role"})),
     h("div",{class:"card stat wide"},h("span",{class:"lab",text:"Nights by year"}),yearChart(mine))));
+  wrap.push(draftsSection());
   wrap.push(thisWeek(mine));
   wrap.push(h("div",{class:"grid2"},
     section("Most seen performers",barList(performerRows(t.people,6))),
@@ -456,40 +459,79 @@ function viewSignIn(){
 }
 
 /* ---------- add a night ---------- */
+function nearestNight(showId,date){
+  var best=null,bd=Infinity,t=Date.parse(date);
+  S.perfs.forEach(function(p){if(p.showId!==showId||!validDate(p.date)||!p.cast.length)return;var d=Math.abs(Date.parse(p.date)-t);if(d<bd){bd=d;best=p;}});
+  return best?{p:best,days:Math.round(bd/86400000)}:null;
+}
 function loadCastForKey(){
   var f=S.form,show=S.shows.get(f.showId),p=(f.showId&&validDate(f.date))?S.perfs.get(perfKey(f.showId,f.date,f.slot)):null;
   if(p){f.theatre=p.theatre||"";f.location=p.location||"";f.cast=cleanCast(p.cast);f.origin="archive";}
-  else if(show){f.theatre=show.theatre||"";f.location=show.location||"";
-    if(show.company&&show.company.length){f.cast=cleanCast(show.company);f.origin=(show.opened&&show.opened===f.date)?"opening":"baseline";}
+  else if(show){
+    f.theatre=show.theatre||"";f.location=show.location||"";
+    var company=show.company||[],near=validDate(f.date)?nearestNight(f.showId,f.date):null;
+    var fromOpening=show.opened&&validDate(f.date)?Math.abs(Date.parse(f.date)-Date.parse(show.opened))/86400000:Infinity;
+    // The closest night anyone has logged is a better guess than opening night, unless opening night is closer.
+    if(near&&(near.days<=fromOpening||!company.length)){
+      // An understudy who went on that night probably wasn't on yours: put the usual performer back where one is known.
+      f.cast=cleanCast(near.p.cast).map(function(r){
+        if(r.status==="billed") return r;
+        var usual=company.find(function(c){return same(c.role,r.role);});
+        return usual?{role:r.role,performer:usual.performer,status:"billed"}:r;});
+      f.origin="nearby";f.nearText=fmtDate(near.p.date,{month:"long",day:"numeric",year:"numeric"});
+      if(near.p.theatre){f.theatre=near.p.theatre;f.location=near.p.location||f.location;}}
+    else if(company.length){f.cast=cleanCast(company);f.origin=(show.opened&&show.opened===f.date)?"opening":"baseline";}
     else{f.cast=[];f.origin="blank";}}
   else{f.cast=[];f.origin="blank";}
-  f.scanId=null;f.pages=0;
+  f.scanId=null;f.pages=0;f.dirty=false;
+}
+/* Pull every logged night for the chosen show, so the starting cast can come from the closest one. */
+function formEnsure(id){
+  var key="show:"+String(id).toLowerCase(); if(!id||id==="__new"||S.fetched.has(key)) return; S.fetched.add(key);
+  api("/api/performances?show="+encodeURIComponent(id)).then(function(r){
+    r.performances.forEach(function(p){S.perfs.set(p.id,p);}); var f=S.form;
+    if(route().kind==="add"&&f.showId===id&&!f.dirty&&!f.pages&&f.origin!=="draft"){var th=f.theatre,lo=f.location;loadCastForKey();if(f.origin!=="nearby"&&f.origin!=="archive"){f.theatre=th;f.location=lo;}renderCastRows();}
+  }).catch(function(){S.fetched.delete(key);});
 }
 function originText(){
   var f=S.form;
   if(f.scanId) return "Filled from your Playbill scan. Check every name before you save.";
+  if(f.pages) return "Filled from what you scanned or pasted. Check every name before you save.";
+  if(f.origin==="draft") return "Picked up from your unfinished night. Check it, then save.";
   if(f.origin==="archive") return "Someone already logged this performance. Fix anything that's wrong, or save as is.";
   if(f.origin==="opening") return "This is opening night, so the opening company is filled in.";
+  if(f.origin==="nearby") return "Starting point only: this is the cast logged for "+f.nearText+", the closest night on file. Change anyone who was different on your night.";
   if(f.origin==="baseline") return "Starting point only: this is the opening-night company. Change anyone who was different on your night.";
-  return "No cast on file yet. Scan your Playbill, or type it in.";
+  return "No cast on file yet. Scan your Playbill, look it up, or type it in.";
 }
 function renderCastRows(){
   var box=document.getElementById("castrows"); if(!box)return; box.textContent="";
   S.form.cast.forEach(function(r,i){
-    var sel=h("select",{id:"c-status-"+i,"aria-label":"How they appeared",onchange:function(e){r.status=e.target.value;}});
+    var sel=h("select",{id:"c-status-"+i,"aria-label":"How they appeared",onchange:function(e){r.status=e.target.value;S.form.dirty=true;}});
     STATUSES.forEach(function(s){sel.appendChild(h("option",{value:s[0],text:s[1]}));}); sel.value=r.status;
     box.appendChild(h("div",{class:"castrow"},
-      h("input",{type:"text",id:"c-role-"+i,value:r.role,placeholder:"Role","aria-label":"Role",oninput:function(e){r.role=e.target.value;}}),
-      h("input",{type:"text",id:"c-perf-"+i,value:r.performer,placeholder:"Performer","aria-label":"Performer",oninput:function(e){r.performer=e.target.value;}}),
-      sel,h("button",{class:"x",type:"button","aria-label":"Remove this row",text:"×",onclick:function(){S.form.cast.splice(i,1);renderCastRows();}})));
+      h("input",{type:"text",id:"c-role-"+i,value:r.role,placeholder:"Role","aria-label":"Role",oninput:function(e){r.role=e.target.value;S.form.dirty=true;}}),
+      h("input",{type:"text",id:"c-perf-"+i,value:r.performer,placeholder:"Performer","aria-label":"Performer",oninput:function(e){r.performer=e.target.value;S.form.dirty=true;}}),
+      sel,h("button",{class:"x",type:"button","aria-label":"Remove this row",text:"×",onclick:function(){S.form.cast.splice(i,1);S.form.dirty=true;renderCastRows();}})));
   });
   var o=document.getElementById("origin"); if(o) o.textContent=originText();
   [["f-theatre","theatre"],["f-location","location"]].forEach(function(x){var n=document.getElementById(x[0]); if(n&&document.activeElement!==n) n.value=S.form[x[1]];});
 }
 function viewAdd(){
-  var f=S.form,isNew=f.showId==="__new",rekey=function(){if(!isNew){loadCastForKey();renderCastRows();}};
+  var f=S.form,isNew=f.showId==="__new",rekey=function(){if(!isNew&&!f.dirty&&!f.pages&&f.origin!=="draft"){loadCastForKey();renderCastRows();}};
+  formEnsure(f.showId);
   var sel=h("select",{id:"f-show",onchange:function(e){f.showId=e.target.value;loadCastForKey();render();}});
   sel.appendChild(h("option",{value:"",text:"Choose a show"}));
+  var title=isNew?f.newTitle.trim():(S.shows.get(f.showId)||{}).title||"";
+  var when=validDate(f.date)?fmtDate(f.date,{month:"long",year:"numeric"}):f.dateGuess.trim();
+  var help=h("details",{class:"help",open:f.helpOpen,ontoggle:function(e){f.helpOpen=e.target.open;}},
+    h("summary",{text:"No Playbill? Look it up, then paste the cast"}),
+    h("div",{class:"helpbody"},title?lookItUp(title,when):h("div",{class:"muted small",text:"Choose a show first and the research links appear here."}),
+    h("div",{class:"field"},h("label",{for:"f-paste",text:"Paste a cast list you found"}),
+      h("textarea",{id:"f-paste",rows:"4",placeholder:"Copy the cast from IBDB, Wikipedia or Playbill and paste it here",oninput:function(e){f.paste=e.target.value;}},f.paste)),
+    h("div",{class:"row",style:"align-items:center"},
+      h("button",{type:"button",class:"btn small",disabled:f.busy,text:f.busy?"Reading…":"Fill in from this text",onclick:runPaste}),
+      h("span",{class:"muted small",role:"status",text:f.pasteMsg||"Looked-up casts stay marked Unconfirmed: they show who was scheduled, not who went on."}))));
   Array.from(S.shows.values()).sort(function(a,b){return a.title.localeCompare(b.title);}).forEach(function(s){sel.appendChild(h("option",{value:s.id,text:s.title}));});
   sel.appendChild(h("option",{value:"__new",text:"A show that isn't listed…"})); sel.value=f.showId;
   var panel=h("form",{class:"panel",onsubmit:function(e){e.preventDefault();save();}},
@@ -497,10 +539,12 @@ function viewAdd(){
       h("input",{type:"file",id:"f-scan",accept:"image/*",multiple:true,class:"hide",onchange:function(e){if(e.target.files&&e.target.files.length)runScan(Array.from(e.target.files));e.target.value="";}}),
       h("button",{type:"button",class:"btn primary",id:"scan-btn",disabled:f.busy,text:f.busy?"Reading this page…":f.pages?"Scan another page":"Scan a Playbill",onclick:function(){
         if(!S.user){f.scanMsg="Sign in first to scan a Playbill.";render();return;} document.getElementById("f-scan").click();}}),
-      h("span",{class:"muted small",id:"scan-msg",style:"flex:1 1 240px",text:f.scanMsg||"Fastest way in: scan the cast list one page at a time, then the understudy slip. Each page adds to the list. Photos are read once and not stored."})),
+      h("span",{class:"muted small",id:"scan-msg",style:"flex:1 1 240px",text:f.scanMsg||"Fastest way in: scan the cast list one page at a time, then the understudy slip. Each page adds to the list. A screenshot of a cast list works too. Photos are read once and not stored."})),
     h("div",{class:"row"},
       h("div",{class:"field",style:"flex:2 1 260px"},h("label",{for:"f-show",text:"Show"}),sel),
-      h("div",{class:"field"},h("label",{for:"f-date",text:"Date you went"}),h("input",{type:"date",id:"f-date",value:f.date,onchange:function(e){f.date=e.target.value;rekey();}})),
+      h("div",{class:"field"},h("label",{for:"f-date",text:"Date you went"}),h("input",{type:"date",id:"f-date",value:f.date,onchange:function(e){f.date=e.target.value;rekey();render();}}),
+        f.unsure?h("input",{type:"text",id:"f-guess",value:f.dateGuess,placeholder:"Roughly when? e.g. spring 2016","aria-label":"Roughly when",oninput:function(e){f.dateGuess=e.target.value;},onchange:function(){render();}})
+          :h("button",{type:"button",class:"linkish small",style:"align-self:flex-start",text:"Not sure of the date?",onclick:function(){f.unsure=true;render();var n=document.getElementById("f-guess");if(n)n.focus();}})),
       h("div",{class:"field",style:"flex:0 0 auto"},h("span",{class:"lab",text:"Performance"}),
         h("div",{class:"seg"},
           h("input",{type:"radio",name:"slot",id:"f-mat",value:"mat",checked:f.slot==="mat",onchange:function(){f.slot="mat";rekey();}}),h("label",{for:"f-mat",text:"Matinee"}),
@@ -510,14 +554,16 @@ function viewAdd(){
     h("div",{class:"row"},
       h("div",{class:"field"},h("label",{for:"f-theatre",text:"Theatre"}),h("input",{type:"text",id:"f-theatre",value:f.theatre,placeholder:"Richard Rodgers Theatre",oninput:function(e){f.theatre=e.target.value;}})),
       h("div",{class:"field"},h("label",{for:"f-location",text:"Location"}),h("input",{type:"text",id:"f-location",value:f.location,placeholder:"New York, NY",oninput:function(e){f.location=e.target.value;}}))),
+    help,
     h("div",{class:"stack",style:"gap:8px"},h("h2",{text:"Who was on"}),h("div",{class:"muted small",id:"origin",text:originText()})),
     h("div",{class:"castgrid",id:"castrows"}),
-    h("div",null,h("button",{type:"button",class:"btn small",text:"Add a role",onclick:function(){f.cast.push({role:"",performer:"",status:"billed"});renderCastRows();var n=document.getElementById("c-role-"+(f.cast.length-1));if(n)n.focus();}})),
+    h("div",null,h("button",{type:"button",class:"btn small",text:"Add a role",onclick:function(){f.cast.push({role:"",performer:"",status:"billed"});f.dirty=true;renderCastRows();var n=document.getElementById("c-role-"+(f.cast.length-1));if(n)n.focus();}})),
     h("div",{class:"row"},
       h("div",{class:"field",style:"flex:0 1 160px"},h("label",{for:"f-seat",text:"Seat (optional)"}),h("input",{type:"text",id:"f-seat",value:f.seat,oninput:function(e){f.seat=e.target.value;}})),
       h("div",{class:"field",style:"flex:3 1 260px"},h("label",{for:"f-note",text:"Note to yourself (optional)"}),h("input",{type:"text",id:"f-note",value:f.note,oninput:function(e){f.note=e.target.value;}}))),
     h("div",{class:"row",style:"align-items:center"},
       h("button",{type:"submit",class:"btn primary",id:"save-btn",text:S.user?"I was there. Save it":"Sign in to save"}),
+      S.user?h("button",{type:"button",class:"btn",id:"later-btn",text:"Save for later",title:"Keep what you have and finish it when you know more",onclick:saveLater}):null,
       h("span",{class:"muted small",id:"save-msg",role:"status",text:f.msg})));
   return [h("div",{class:"stack"},h("div",{class:"eyebrow",text:"Add a night"}),h("h1",{text:"Which performance did you see?"})),panel];
 }
@@ -533,12 +579,23 @@ async function runScan(files){
     var fd=new FormData(),blobs=await Promise.all(files.slice(0,4).map(shrink));
     blobs.forEach(function(b,i){fd.append("images",b,"page"+i+".jpg");});
     var out=await api("/api/scan",{method:"POST",body:fd});
-    applyScan(out.result||{},out.scanId);
+    applyScan(out.result||{},out.scanId,"Page");
+    if(out.result&&out.result.cast&&out.result.cast.length&&!out.result.printed) f.scanMsg+=" This looks like a screenshot, so the night stays marked Unconfirmed.";
   }catch(e){f.scanMsg=e.message;}
   f.busy=false; render();
 }
 /* Each scan is one page. The first page replaces a pre-filled starting cast; later pages add to what's there. */
-function applyScan(o,scanId){
+async function runPaste(){
+  var f=S.form; if(!S.user){f.pasteMsg="Sign in first to use this.";render();return;}
+  if(f.paste.trim().length<10){f.pasteMsg="Paste the cast list first.";render();return;}
+  f.busy=true; f.pasteMsg=""; render();
+  try{
+    var out=await send("POST","/api/parse",{text:f.paste,date:f.date,dateGuess:f.dateGuess});
+    applyScan(out.result||{},null,"Pasted list"); f.pasteMsg=f.scanMsg; f.scanMsg=""; f.paste="";
+  }catch(e){f.pasteMsg=e.message;}
+  f.busy=false; render();
+}
+function applyScan(o,scanId,label){
   var f=S.form,cast=cleanCast(o.cast).filter(function(r){return r.role&&r.performer;}),title=String(o.show||"").trim();
   var first=f.pages===0;
   if(title&&(first||!f.showId)){var hit=null;S.shows.forEach(function(v,k){if(norm(v.title)===norm(title))hit=k;});
@@ -550,7 +607,7 @@ function applyScan(o,scanId){
   if((o.slot==="mat"||o.slot==="eve")&&first) f.slot=o.slot;
   if(!cast.length){f.scanMsg="No cast was readable on that page. Try again straight-on, or scan the next page.";return;}
   var typed=f.cast.some(function(r){return r.role||r.performer;});
-  if(first&&(f.origin==="baseline"||f.origin==="opening"||!typed)) f.cast=[];
+  if(first&&!f.dirty&&(f.origin==="baseline"||f.origin==="opening"||f.origin==="nearby"||!typed)) f.cast=[];
   var added=0,changed=0;
   cast.forEach(function(r){
     r.scanned=true;
@@ -562,8 +619,8 @@ function applyScan(o,scanId){
     if(!same(old.performer,r.performer)||old.status!==r.status) changed++;
     r.role=old.role; f.cast[i]=r;
   });
-  f.pages++; f.scanId=scanId;
-  f.scanMsg="Page "+f.pages+": "+plural(added,"role","roles")+" added"+(changed?", "+changed+" updated":"")+". "+plural(f.cast.length,"role","roles")+" so far. Scan the next page or the understudy slip, or save.";
+  f.pages++; if(scanId) f.scanId=scanId;
+  f.scanMsg=(label==="Page"?"Page "+f.pages:label)+": "+plural(added,"role","roles")+" added"+(changed?", "+changed+" updated":"")+". "+plural(f.cast.length,"role","roles")+" so far. Scan the next page or the understudy slip, or save.";
 }
 async function save(){
   var f=S.form,msg=function(t){f.msg=t;var m=document.getElementById("save-msg");if(m)m.textContent=t;};
@@ -581,8 +638,67 @@ async function save(){
     S.perfs.set(r.performance.id,r.performance);
     if(r.attendance) S.diary.set(r.performance.id,r.attendance);
     if(!S.shows.has(r.performance.showId)){try{(await api("/api/shows")).shows.forEach(function(s){S.shows.set(s.id,s);});}catch(e){}}
+    if(f.draftId){var did=f.draftId;S.drafts.delete(did);api("/api/drafts/"+did,{method:"DELETE"}).catch(function(){});}
     S.form=blankForm(); go("night/"+encodeURIComponent(r.performance.id));
   }catch(e){ if(btn)btn.disabled=false; if(e.status===401){S.user=null;go("sign-in");return;} msg(e.message); }
+}
+/* ---------- unfinished nights ---------- */
+async function saveLater(){
+  var f=S.form,msg=function(t){f.msg=t;var m=document.getElementById("save-msg");if(m)m.textContent=t;};
+  if(!f.showId||(f.showId==="__new"&&!f.newTitle.trim())) return msg("Choose a show first. That's all an unfinished night needs.");
+  var keepCast=f.dirty||f.pages||f.origin==="draft";
+  try{
+    var r=await send("PUT","/api/drafts",{id:f.draftId,showId:f.showId==="__new"?null:f.showId,showTitle:f.newTitle,theatre:f.theatre,location:f.location,
+      date:f.date,dateGuess:f.dateGuess,slot:f.slot,cast:keepCast?cleanCast(f.cast):[],seat:f.seat,note:f.note});
+    S.drafts.set(r.draft.id,r.draft); S.form=blankForm(); go("draft/"+r.draft.id);
+  }catch(e){ if(e.status===401){S.user=null;go("sign-in");return;} msg(e.message); }
+}
+function draftWhen(d){return validDate(d.date)?fmtDate(d.date,{month:"short",day:"numeric",year:"numeric"}):(d.dateGuess||"Date unknown");}
+function draftNeeds(d){var n=[];if(!validDate(d.date))n.push("a date");if(!d.cast.length)n.push("a cast");return n.length?"Needs "+n.join(" and "):"Ready to finish";}
+function draftsSection(){
+  if(!S.drafts.size) return null;
+  var box=h("div",{class:"stack"});
+  S.drafts.forEach(function(d){box.appendChild(h("a",{class:"nightcard draft",href:"#/draft/"+d.id},tile(d.showTitle),
+    h("span",{class:"main"},h("span",{class:"t",text:d.showTitle}),h("br"),h("span",{class:"s",text:draftNeeds(d)+(d.theatre?" · "+d.theatre:"")})),
+    h("span",{class:"when"},h("b",{text:draftWhen(d)}),"Unfinished")));});
+  return section("Needs finishing",box,h("span",{class:"muted small",text:"Only you can see these"}));
+}
+function lookItUp(title,when){
+  var e=entity("show",title),q=function(t){return "https://duckduckgo.com/?q="+encodeURIComponent(t);},links=h("div",{class:"chips"});
+  links.appendChild(e&&e.ibdb?out(e.ibdb,"IBDB: casts and replacements"):out(q('site:ibdb.com "'+title+'"'),"Find it on IBDB"));
+  links.appendChild(e&&e.wikipedia?out(e.wikipedia,"Wikipedia"):out("https://en.wikipedia.org/w/index.php?search="+encodeURIComponent(title+" Broadway"),"Search Wikipedia"));
+  links.appendChild(out(q('site:playbill.com "'+title+'" Broadway cast'),"Playbill"));
+  links.appendChild(out(q('"'+title+'" Broadway cast '+(when||"")),"Web search"+(when?" for "+when:"")));
+  return h("div",{class:"stack",style:"gap:10px"},links,
+    h("ul",{class:"tips"},
+      h("li",{text:"Not sure of the date? Search your email for the ticket confirmation (Telecharge, Ticketmaster, TodayTix, TKTS)."}),
+      h("li",{text:"Check your photos from that trip, your calendar, or your card statement."}),
+      h("li",{text:"Copy the cast list you find, come back, and paste it in. A screenshot works with Scan a Playbill."})));
+}
+function resumeDraft(d){
+  S.form=Object.assign(blankForm(),{showId:d.showId||"__new",newTitle:d.showId?"":d.showTitle,date:d.date||"",dateGuess:d.dateGuess||"",unsure:!validDate(d.date)&&!!d.dateGuess,
+    slot:d.slot,seat:d.seat||"",note:d.note||"",draftId:d.id,helpOpen:!d.cast.length});
+  if(d.cast.length){S.form.cast=cleanCast(d.cast);S.form.origin="draft";S.form.dirty=true;S.form.theatre=d.theatre||"";S.form.location=d.location||"";}
+  else{loadCastForKey();if(d.theatre)S.form.theatre=d.theatre;if(d.location)S.form.location=d.location;}
+  go("add");
+}
+function viewDraft(id){
+  var d=S.drafts.get(id);
+  if(!d) return [h("div",{class:"note",text:S.ready?"That unfinished night isn't here any more.":"Loading…"})];
+  var when=validDate(d.date)?fmtDate(d.date,{month:"long",year:"numeric"}):d.dateGuess,parts=[
+    h("div",{class:"hero"},tile(d.showTitle,true),h("div",null,h("div",{class:"eyebrow",text:"Unfinished night · only you can see this"}),h("h1",{text:d.showTitle}),
+      h("div",{class:"meta",text:[validDate(d.date)?fmtDate(d.date)+" · "+slotName(d.slot):(d.dateGuess||"Date unknown"),d.theatre].filter(Boolean).join(" · ")}))),
+    h("div",{class:"row",style:"align-items:center"},h("span",{class:"chip warn",text:draftNeeds(d)}),
+      h("button",{type:"button",class:"btn primary small",text:"Finish this night",onclick:function(){resumeDraft(d);}}),
+      h("button",{type:"button",class:"btn small ghost",text:"Delete",onclick:async function(){
+        try{await api("/api/drafts/"+d.id,{method:"DELETE"});S.drafts.delete(d.id);go("");}catch(e){banner(e.message,true);}}})),
+    d.note?h("div",{class:"note",text:d.note}):null,
+    section("Look it up",h("div",{class:"card"},lookItUp(d.showTitle,when)))];
+  if(d.cast.length){var cast=h("div",{class:"card cast"});
+    cleanCast(d.cast).forEach(function(r){cast.appendChild(h("div",{class:"castline"},avatar(r.performer),h("div",{class:"who"},linkPerformer(r.performer),h("div",{class:"role",text:r.role})),
+      r.status!=="billed"?h("span",{class:"chip warn plain",text:statusName(r.status)}):null));});
+    parts.push(section("Cast so far",cast));}
+  return parts;
 }
 function editPerf(id){
   var p=S.perfs.get(id); if(!p)return; var d=S.diary.get(id)||{};
@@ -596,7 +712,7 @@ function render(){
   ["me","archive","add"].forEach(function(n){var a=document.getElementById("nav-"+n);if(n===nav)a.setAttribute("aria-current","page");else a.removeAttribute("aria-current");});
   renderAccount();
   var parts=r.kind==="archive"?viewArchive():r.kind==="add"?viewAdd():r.kind==="sign-in"?viewSignIn():r.kind==="night"?viewNight(r.arg):
-    r.kind==="show"?viewShow(r.arg):r.kind==="performer"?viewPerformer(r.arg):r.kind==="theatre"?viewTheatre(r.arg):viewMe();
+    r.kind==="draft"?viewDraft(r.arg):r.kind==="show"?viewShow(r.arg):r.kind==="performer"?viewPerformer(r.arg):r.kind==="theatre"?viewTheatre(r.arg):viewMe();
   $view.textContent=""; parts.forEach(function(n){if(n)$view.appendChild(n);});
   if(r.kind==="add") renderCastRows();
 }

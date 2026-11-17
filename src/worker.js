@@ -210,7 +210,8 @@ async function getPerformance(env, id) {
 async function me(env, user) {
   const signIn = env.ACCESS_TEAM ? "access" : "code";
   if (!user) return json({ user: null, signIn, attendance: [], performances: [] });
-  const [att, perfs, cast] = await env.DB.batch([
+  const [drafts, att, perfs, cast] = await env.DB.batch([
+    env.DB.prepare("SELECT * FROM drafts WHERE user_id = ? ORDER BY updated_at DESC").bind(user.id),
     env.DB.prepare("SELECT performance_id AS perfId, seat, note FROM attendance WHERE user_id = ?").bind(user.id),
     env.DB.prepare(
       `SELECT ${PERF_COLS} FROM attendance a JOIN performances p ON p.id = a.performance_id JOIN shows s ON s.id = p.show_id WHERE a.user_id = ?`,
@@ -220,7 +221,7 @@ async function me(env, user) {
         "WHERE a.user_id = ? ORDER BY pc.performance_id, pc.position",
     ).bind(user.id),
   ]);
-  return json({ user: { email: user.email }, signIn, attendance: att.results, performances: attachCast(perfs.results, cast.results) });
+  return json({ user: { email: user.email }, signIn, drafts: drafts.results.map(draftOut), attendance: att.results, performances: attachCast(perfs.results, cast.results) });
 }
 
 async function savePerformance(req, env, user, ctx) {
@@ -252,7 +253,10 @@ async function savePerformance(req, env, user, ctx) {
   const id = `${show.id}_${date}_${slot}`;
   const prev = await getPerformance(env, id);
   let scanned = false;
-  if (b.scanId) scanned = !!(await env.DB.prepare("SELECT id FROM scans WHERE id = ? AND user_id = ?").bind(text(b.scanId, 64), user.id).first());
+  if (b.scanId) {
+    const scan = await env.DB.prepare("SELECT result_json FROM scans WHERE id = ? AND user_id = ?").bind(text(b.scanId, 64), user.id).first();
+    try { scanned = !!scan && JSON.parse(scan.result_json).printed === true; } catch (e) { scanned = false; }
+  }
   const sameCast = prev && JSON.stringify(prev.cast) === JSON.stringify(cast);
   const sameVenue = prev && prev.theatre === theatre && prev.location === location;
   const verified = scanned || (sameCast && prev.verified);
@@ -285,6 +289,40 @@ async function savePerformance(req, env, user, ctx) {
   const saved = await getPerformance(env, id);
   if (changed && ctx) ctx.waitUntil(warmEntities(env, saved));
   return json({ performance: saved, attendance });
+}
+
+/* ---------- unfinished nights ---------- */
+
+const draftOut = (d) => {
+  let cast = [];
+  try { cast = JSON.parse(d.cast_json); } catch (e) { /* keep empty */ }
+  return { id: d.id, showId: d.show_id, showTitle: d.show_title, theatre: d.theatre, location: d.location, date: d.date, dateGuess: d.date_guess, slot: d.slot, cast, seat: d.seat, note: d.note };
+};
+
+async function saveDraft(req, env, user) {
+  const b = await req.json().catch(() => null);
+  if (!b) return fail("Nothing to save.");
+  let showId = null, title = text(b.showTitle);
+  if (b.showId) {
+    const show = await env.DB.prepare("SELECT id, title FROM shows WHERE id = ?").bind(text(b.showId, 80)).first();
+    if (show) { showId = show.id; title = show.title; }
+  }
+  if (!title) return fail("Choose a show, or type its title.");
+  const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM drafts WHERE user_id = ?").bind(user.id).first();
+  const id = /^[a-f0-9]{24}$/.test(b.id || "") ? b.id : randomToken(12);
+  if (id !== b.id && count.n >= 300) return fail("You have a lot of unfinished nights. Finish or delete some first.", 429);
+  const date = validDate(b.date) ? b.date : "";
+  const cast = (Array.isArray(b.cast) ? b.cast.slice(0, 80) : []).map((r) => ({
+    role: text(r && r.role), performer: text(r && r.performer), status: STATUSES.includes(r && r.status) ? r.status : "billed",
+  })).filter((r) => r.role || r.performer);
+  await env.DB.prepare(
+    "INSERT INTO drafts (id, user_id, show_id, show_title, theatre, location, date, date_guess, slot, cast_json, seat, note, updated_at) " +
+      "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, datetime('now')) " +
+      "ON CONFLICT(id) DO UPDATE SET show_id = ?3, show_title = ?4, theatre = ?5, location = ?6, date = ?7, date_guess = ?8, slot = ?9, cast_json = ?10, seat = ?11, note = ?12, updated_at = datetime('now') " +
+      "WHERE drafts.user_id = ?2",
+  ).bind(id, user.id, showId, title, text(b.theatre), text(b.location), date, text(b.dateGuess, 80), b.slot === "mat" ? "mat" : "eve", JSON.stringify(cast), text(b.seat, 40), text(b.note, 400)).run();
+  const row = await env.DB.prepare("SELECT * FROM drafts WHERE id = ? AND user_id = ?").bind(id, user.id).first();
+  return row ? json({ draft: draftOut(row) }) : fail("That unfinished night isn't yours to change.", 403);
 }
 
 async function attend(env, user, perfId, on) {
@@ -435,7 +473,8 @@ const SCAN_PROMPT =
   "These photos are from one theatre performance: a Playbill title or cast page, and possibly an understudy slip, cast board or ticket. " +
   'Read them and reply with only one JSON object: {"show": string or null, "theatre": string or null, ' +
   '"location": string or null, "date": "YYYY-MM-DD" or null, "slot": "mat" or "eve" or null, ' +
-  '"cast": [{"role": string, "performer": string, "status": "billed"|"understudy"|"standby"|"swing"|"alternate"}]}. ' +
+  '"cast": [{"role": string, "performer": string, "status": "billed"|"understudy"|"standby"|"swing"|"alternate"}], "printed": true or false}. ' +
+  '"printed" is true only if the photos show a physical printed program, slip, ticket or lobby cast board; false for a screenshot or photo of a website, app or screen. ' +
   "List each role once with the person who actually played it at this performance: where a slip or board says a role is played by someone else " +
   "at this performance, use that person and the matching status. Location is the theatre's city and state or country, only if printed. " +
   "Use the date and time only if they are printed on a ticket or slip in the photos. Copy names exactly as printed. " +
@@ -472,10 +511,45 @@ async function scan(req, env, user) {
     date: validDate(parsed.date) ? parsed.date : null,
     slot: parsed.slot === "mat" || parsed.slot === "eve" ? parsed.slot : null,
     cast: cleanCast(parsed.cast),
+    printed: parsed.printed === true,
   };
   const scanId = randomToken(16);
   await env.DB.prepare("INSERT INTO scans (id, user_id, result_json) VALUES (?, ?, ?)").bind(scanId, user.id, JSON.stringify(result)).run();
-  return json({ scanId, result });
+  // Only a scan of something printed can vouch for a cast; a screenshot of a web page is research, not proof.
+  return json({ scanId: result.printed ? scanId : null, result });
+}
+
+const PASTE_PROMPT =
+  "Below is text a person copied from a web page or document about a theatre production (for example a cast list, a cast-history table or a replacement list). " +
+  'Reply with only one JSON object: {"cast": [{"role": string, "performer": string}]}. ' +
+  "List each role once. If the text gives dates for when different people played a role and a target date is given, choose the person in the role on that date; " +
+  "if you cannot tell, use the first (original) performer. Copy names exactly as written. Leave out anything that is not a role and performer. Do not add anyone who is not in the text.";
+
+async function parsePaste(req, env, user) {
+  if (!env.ANTHROPIC_API_KEY) return fail("This isn't set up yet.", 501);
+  const b = await req.json().catch(() => ({}));
+  const pasted = String(b.text || "").trim().slice(0, 20000);
+  if (pasted.length < 10) return fail("Paste the cast list first.");
+  const recent = await env.DB.prepare("SELECT COUNT(*) AS n FROM scans WHERE user_id = ? AND created_at > datetime('now', '-1 day')").bind(user.id).first();
+  if (recent.n >= 30) return fail("You've reached today's limit for scans and pasted lists. Type the cast in, or try tomorrow.", 429);
+  const target = validDate(b.date) ? b.date : text(b.dateGuess, 80);
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "x-api-key": env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+    body: JSON.stringify({
+      model: env.ANTHROPIC_MODEL, max_tokens: 3000,
+      messages: [{ role: "user", content: PASTE_PROMPT + (target ? "\n\nTarget date: " + target : "") + "\n\nText:\n" + pasted }],
+    }),
+  });
+  if (!res.ok) return fail("That couldn't be read just now. Try again.", 502);
+  const data = await res.json();
+  const raw = (data.content || []).filter((c) => c.type === "text").map((c) => c.text).join("");
+  let parsed = null;
+  try { parsed = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1)); } catch (e) { /* handled below */ }
+  const cast = cleanCast(parsed && parsed.cast);
+  await env.DB.prepare("INSERT INTO scans (id, user_id, result_json) VALUES (?, ?, ?)").bind("paste_" + randomToken(12), user.id, JSON.stringify({ cast, pasted: true })).run();
+  if (!cast.length) return fail("No roles and performers were found in that text.", 422);
+  return json({ result: { cast } });
 }
 
 /* ---------- router ---------- */
@@ -502,6 +576,13 @@ export default {
       if (!user) return fail("Sign in to do that.", 401);
       if (method === "PUT" && path === "/performances") return savePerformance(req, env, user, ctx);
       if (method === "POST" && path === "/scan") return scan(req, env, user);
+      if (method === "POST" && path === "/parse") return parsePaste(req, env, user);
+      if (method === "PUT" && path === "/drafts") return saveDraft(req, env, user);
+      const dm = path.match(/^\/drafts\/([a-f0-9]{24})$/);
+      if (dm && method === "DELETE") {
+        await env.DB.prepare("DELETE FROM drafts WHERE id = ? AND user_id = ?").bind(dm[1], user.id).run();
+        return json({ ok: true });
+      }
       const m = path.match(/^\/attendance\/([A-Za-z0-9_-]{1,120})$/);
       if (m && method === "POST") return attend(env, user, m[1], true);
       if (m && method === "DELETE") return attend(env, user, m[1], false);

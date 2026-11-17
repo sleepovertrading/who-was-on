@@ -150,3 +150,17 @@ img.avatar{object-fit:cover;object-position:50% 20%}
 .yr i.zero{background:var(--raised)}
 .yr span{font-size:10.5px;color:var(--faint);height:12px;line-height:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
 a.linkrow:hover b{color:var(--a2)}
+
+/* research help and unfinished nights */
+textarea{background:var(--bg);border:1px solid var(--line-strong);border-radius:var(--r-sm);padding:10px 12px;width:100%;font:inherit;color:inherit;resize:vertical}
+textarea:focus{border-color:var(--a2);outline:0}
+details.help{border:1px solid var(--line);border-radius:var(--r);padding:0 16px;background:var(--bg)}
+details.help[open]{padding-bottom:16px}
+.helpbody{display:flex;flex-direction:column;gap:14px}
+details.help summary{cursor:pointer;font-weight:700;font-size:14px;padding:13px 0;list-style:none;display:flex;align-items:center;gap:8px}
+details.help summary::-webkit-details-marker{display:none}
+details.help summary::before{content:"+";display:inline-grid;place-items:center;width:20px;height:20px;border-radius:50%;background:var(--raised);color:var(--a2);font-weight:800}
+details.help[open] summary::before{content:"–"}
+.tips{margin:0;padding-left:18px;color:var(--muted);font-size:13px;display:flex;flex-direction:column;gap:4px}
+.nightcard.draft{border-style:dashed}
+.linkish.small{font-size:12.5px;color:var(--muted);text-decoration:underline}

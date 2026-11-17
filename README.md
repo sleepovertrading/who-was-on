@@ -25,3 +25,6 @@ One Cloudflare Worker serves the site (`public/`) and the API (`src/worker.js`),
 - Playbill photos are sent to the Anthropic API once and never stored; only the extracted cast is kept.
 - A performance is marked verified only when its current cast came from a scan. Every change is kept in `cast_revisions`.
 - The four seeded shows carry opening-night principals typed from memory. Replace with a sourced import before launch.
+- Links out and performer photos come from Wikidata and Wikimedia Commons, matched once per name and cached in `entities`. Matching is strict; unmatched names get search links.
+- Unfinished nights (`drafts`) are private to one person and never appear in the shared archive.
+- Only a scan of something printed (program, slip, cast board, ticket) marks a performance verified. Screenshots and pasted cast lists fill in the form but stay unconfirmed.
