@@ -8,8 +8,7 @@
     {
       "binding": "DB",
       "database_name": "who-was-on",
-      // Replace after `wrangler d1 create who-was-on`.
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "6d219247-34dc-47c2-8ee3-808423df05c1",
       "migrations_dir": "migrations"
     }
   ],
@@ -17,7 +16,7 @@
     "ANTHROPIC_MODEL": "claude-sonnet-5-5",
     // PRIVATE BETA: while ACCESS_TEAM is set, Cloudflare Access (free) guards the whole site and handles sign-in.
     // Set it to your Zero Trust team name. Remove it to switch to the public email-code sign-in below.
-    "ACCESS_TEAM": "",
+    "ACCESS_TEAM": "shelfandbin",
     // PUBLIC LAUNCH: an address on a domain added to Cloudflare Email Service.
     "MAIL_FROM": "login@example.com"
   }
