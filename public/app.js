@@ -1,6 +1,6 @@
 (function(){
 "use strict";
-function blankForm(){return {showId:"",newTitle:"",theatre:"",location:"",date:"",slot:"eve",cast:[],origin:"blank",scanId:null,seat:"",note:"",msg:"",scanMsg:"",busy:false};}
+function blankForm(){return {showId:"",newTitle:"",theatre:"",location:"",date:"",slot:"eve",cast:[],origin:"blank",scanId:null,pages:0,seat:"",note:"",msg:"",scanMsg:"",busy:false};}
 var S={user:null,shows:new Map(),perfs:new Map(),diary:new Map(),ready:false,fetched:new Set(),q:"",form:blankForm(),auth:{email:"",step:"email",msg:""}};
 var STATUSES=[["billed","As billed"],["understudy","Understudy"],["standby","Standby"],["swing","Swing"],["alternate","Alternate"]];
 var $view=document.getElementById("view"),$banner=document.getElementById("banner");
@@ -291,7 +291,7 @@ function loadCastForKey(){
     if(show.company&&show.company.length){f.cast=cleanCast(show.company);f.origin=(show.opened&&show.opened===f.date)?"opening":"baseline";}
     else{f.cast=[];f.origin="blank";}}
   else{f.cast=[];f.origin="blank";}
-  f.scanId=null;
+  f.scanId=null;f.pages=0;
 }
 function originText(){
   var f=S.form;
@@ -323,9 +323,9 @@ function viewAdd(){
   var panel=h("form",{class:"panel",onsubmit:function(e){e.preventDefault();save();}},
     h("div",{class:"scanbox"},
       h("input",{type:"file",id:"f-scan",accept:"image/*",multiple:true,class:"hide",onchange:function(e){if(e.target.files&&e.target.files.length)runScan(Array.from(e.target.files));e.target.value="";}}),
-      h("button",{type:"button",class:"btn primary",id:"scan-btn",disabled:f.busy,text:f.busy?"Reading your Playbill…":"Scan a Playbill",onclick:function(){
+      h("button",{type:"button",class:"btn primary",id:"scan-btn",disabled:f.busy,text:f.busy?"Reading this page…":f.pages?"Scan another page":"Scan a Playbill",onclick:function(){
         if(!S.user){f.scanMsg="Sign in first to scan a Playbill.";render();return;} document.getElementById("f-scan").click();}}),
-      h("span",{class:"muted small",id:"scan-msg",style:"flex:1 1 240px",text:f.scanMsg||"Fastest way in: photograph the cast page and the understudy slip. Photos are read once and not stored."})),
+      h("span",{class:"muted small",id:"scan-msg",style:"flex:1 1 240px",text:f.scanMsg||"Fastest way in: scan the cast list one page at a time, then the understudy slip. Each page adds to the list. Photos are read once and not stored."})),
     h("div",{class:"row"},
       h("div",{class:"field",style:"flex:2 1 260px"},h("label",{for:"f-show",text:"Show"}),sel),
       h("div",{class:"field"},h("label",{for:"f-date",text:"Date you went"}),h("input",{type:"date",id:"f-date",value:f.date,onchange:function(e){f.date=e.target.value;rekey();}})),
@@ -365,17 +365,33 @@ async function runScan(files){
   }catch(e){f.scanMsg=e.message;}
   f.busy=false; render();
 }
+/* Each scan is one page. The first page replaces a pre-filled starting cast; later pages add to what's there. */
 function applyScan(o,scanId){
-  var f=S.form,cast=cleanCast(o.cast),title=String(o.show||"").trim();
-  if(title){var hit=null;S.shows.forEach(function(v,k){if(norm(v.title)===norm(title))hit=k;});
+  var f=S.form,cast=cleanCast(o.cast).filter(function(r){return r.role&&r.performer;}),title=String(o.show||"").trim();
+  var first=f.pages===0;
+  if(title&&(first||!f.showId)){var hit=null;S.shows.forEach(function(v,k){if(norm(v.title)===norm(title))hit=k;});
     if(hit){f.showId=hit;f.theatre=S.shows.get(hit).theatre||"";f.location=S.shows.get(hit).location||"";}
     else{f.showId="__new";f.newTitle=title.slice(0,120);}}
-  if(o.theatre) f.theatre=String(o.theatre).slice(0,120);
-  if(o.location) f.location=String(o.location).slice(0,120);
-  if(validDate(o.date)) f.date=o.date;
-  if(o.slot==="mat"||o.slot==="eve") f.slot=o.slot;
-  if(cast.length){f.cast=cast;f.scanId=scanId;f.scanMsg="Read "+cast.length+" roles from your scan.";}
-  else f.scanMsg="No cast list was readable in those photos. Try the cast page itself.";
+  if(o.theatre&&(first||!f.theatre)) f.theatre=String(o.theatre).slice(0,120);
+  if(o.location&&(first||!f.location)) f.location=String(o.location).slice(0,120);
+  if(validDate(o.date)&&(first||!f.date)) f.date=o.date;
+  if((o.slot==="mat"||o.slot==="eve")&&first) f.slot=o.slot;
+  if(!cast.length){f.scanMsg="No cast was readable on that page. Try again straight-on, or scan the next page.";return;}
+  var typed=f.cast.some(function(r){return r.role||r.performer;});
+  if(first&&(f.origin==="baseline"||f.origin==="opening"||!typed)) f.cast=[];
+  var added=0,changed=0;
+  cast.forEach(function(r){
+    r.scanned=true;
+    var i=f.cast.findIndex(function(x){return same(x.role,r.role);});
+    if(i<0){f.cast.push(r);added++;return;}
+    var old=f.cast[i];
+    // A cast page scanned after the understudy slip must not undo the slip.
+    if(old.scanned&&old.status!=="billed"&&r.status==="billed") return;
+    if(!same(old.performer,r.performer)||old.status!==r.status) changed++;
+    r.role=old.role; f.cast[i]=r;
+  });
+  f.pages++; f.scanId=scanId;
+  f.scanMsg="Page "+f.pages+": "+plural(added,"role","roles")+" added"+(changed?", "+changed+" updated":"")+". "+plural(f.cast.length,"role","roles")+" so far. Scan the next page or the understudy slip, or save.";
 }
 async function save(){
   var f=S.form,msg=function(t){f.msg=t;var m=document.getElementById("save-msg");if(m)m.textContent=t;};
