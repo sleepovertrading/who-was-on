@@ -1,7 +1,7 @@
 (function(){
 "use strict";
 function blankForm(){return {showId:"",newTitle:"",theatre:"",location:"",date:"",slot:"eve",cast:[],origin:"blank",scanId:null,pages:0,seat:"",note:"",msg:"",scanMsg:"",busy:false};}
-var S={user:null,shows:new Map(),perfs:new Map(),diary:new Map(),ready:false,fetched:new Set(),q:"",form:blankForm(),auth:{email:"",step:"email",msg:""}};
+var S={user:null,shows:new Map(),perfs:new Map(),diary:new Map(),ready:false,fetched:new Set(),ent:new Map(),entAsked:new Set(),q:"",form:blankForm(),auth:{email:"",step:"email",msg:""}};
 var STATUSES=[["billed","As billed"],["understudy","Understudy"],["standby","Standby"],["swing","Swing"],["alternate","Alternate"]];
 var $view=document.getElementById("view"),$banner=document.getElementById("banner");
 
@@ -39,7 +39,61 @@ function hue(s){var n=0;for(var i=0;i<s.length;i++)n=(n*31+s.charCodeAt(i))%360;
 function initials(s){var w=String(s||"").replace(/^the\s+/i,"").split(/\s+/).filter(Boolean);
   return ((w[0]||"?")[0]+(w.length>1?w[w.length-1][0]:"")).toUpperCase();}
 function tile(title,big){var t=h("span",{class:"tile"+(big?" big":""),"aria-hidden":"true",text:initials(title)});t.style.setProperty("--h",hue(norm(title)));return t;}
-function avatar(name,big){return h("span",{class:"avatar"+(big?" big":""),"aria-hidden":"true",text:initials(name)});}
+function avatar(name,big){
+  var e=S.ent.get("performer:"+String(name).toLowerCase()),cls="avatar"+(big?" big":"");
+  if(!e||!e.image) return h("span",{class:cls,"aria-hidden":"true",text:initials(name)});
+  var img=h("img",{class:cls,src:e.image,alt:"",loading:"lazy",referrerpolicy:"no-referrer"});
+  img.addEventListener("error",function(){img.replaceWith(h("span",{class:cls,"aria-hidden":"true",text:initials(name)}));});
+  return img;
+}
+/* Links out and photos. Matched on the server against Wikidata; search links stand in until (or unless) there's a match. */
+function entity(kind,name){
+  var key=kind+":"+String(name).toLowerCase();
+  if(!S.entAsked.has(key)&&name){S.entAsked.add(key);
+    api("/api/entity?kind="+kind+"&name="+encodeURIComponent(name)).then(function(r){
+      if(!r.entity) return; S.ent.set(key,r.entity); var now=route();
+      if(now.kind===kind) render();
+    }).catch(function(){S.entAsked.delete(key);});}
+  return S.ent.get(key)||null;
+}
+function wantPhotos(names){
+  var ask=names.filter(function(n){var k="performer:"+n.toLowerCase();if(S.entAsked.has(k))return false;S.entAsked.add(k);return true;}).slice(0,90);
+  if(!ask.length) return;
+  send("POST","/api/entities",{names:ask}).then(function(r){
+    var any=false;(r.entities||[]).forEach(function(e){S.ent.set("performer:"+e.key,e);if(e.image)any=true;});
+    // Names with nothing on file yet can be asked for individually later (their own page does a full lookup).
+    ask.forEach(function(n){var k="performer:"+n.toLowerCase();if(!S.ent.has(k))S.entAsked.delete(k);});
+    if(any) render();
+  }).catch(function(){});
+}
+function out(href,label){return h("a",{class:"chip plain out",href:href,target:"_blank",rel:"noopener",text:label+" ↗"});}
+function linksOut(kind,name){
+  var e=entity(kind,name),row=h("div",{class:"chips"});
+  row.appendChild(e&&e.wikipedia?out(e.wikipedia,"Wikipedia"):out("https://en.wikipedia.org/w/index.php?search="+encodeURIComponent(name),"Search Wikipedia"));
+  row.appendChild(e&&e.ibdb?out(e.ibdb,"IBDB"):out("https://duckduckgo.com/?q="+encodeURIComponent('site:ibdb.com "'+name+'"'),"Find on IBDB"));
+  return row;
+}
+function photoCredit(name){
+  var e=S.ent.get("performer:"+String(name).toLowerCase());
+  if(!e||!e.image) return null;
+  return h("div",{class:"credit"},"Photo: ",e.imagePage?h("a",{href:e.imagePage,target:"_blank",rel:"noopener",text:e.imageCredit||"Wikimedia Commons"}):(e.imageCredit||"Wikimedia Commons"));
+}
+function monthYear(d){return fmtDate(d,{month:"short",year:"numeric"});}
+/* "You've been 3 times · first Mar 2016 · last Jun 2024" for any set of your own nights (newest first). */
+function historyLine(mine,verb){
+  if(!S.user) return null;
+  if(!mine.length) return h("div",{class:"yours none",text:"Not on any of your nights yet."});
+  var t=verb+" "+(mine.length===1?"once":mine.length===2?"twice":mine.length+" times");
+  t+=mine.length===1?" · "+fmtDate(mine[0].date,{month:"long",day:"numeric",year:"numeric"}):" · first "+monthYear(mine[mine.length-1].date)+" · last "+monthYear(mine[0].date);
+  return h("div",{class:"yours",text:t});
+}
+function splitNights(perfs,emptyText,subFn){
+  var mine=perfs.filter(function(p){return S.diary.has(p.id);}),others=perfs.filter(function(p){return !S.diary.has(p.id);});
+  var parts=[];
+  if(mine.length) parts.push(section("Your nights",nightList(mine,"",subFn)));
+  if(others.length||!mine.length) parts.push(section(mine.length?"Everyone else's nights":"Nights",nightList(others,emptyText,subFn)));
+  return {mine:mine,parts:parts};
+}
 function linkShow(p){return h("a",{href:"#/show/"+encodeURIComponent(p.showId),text:p.showTitle});}
 function linkPerformer(n){return h("a",{href:"#/performer/"+encodeURIComponent(n),text:n});}
 function linkTheatre(n){return h("a",{href:"#/theatre/"+encodeURIComponent(n),text:n});}
@@ -123,6 +177,36 @@ function performerRows(list,limit){
 }
 
 /* ---------- my shows ---------- */
+function understudyRows(mine){
+  var rows=[];
+  mine.forEach(function(p){cleanCast(p.cast).forEach(function(r){if(r.status!=="billed"&&r.performer) rows.push({p:p,r:r});});});
+  return rows;
+}
+function crossovers(mine){
+  var by=new Map();
+  mine.forEach(function(p){cleanCast(p.cast).forEach(function(r){if(!r.performer)return;var k=r.performer.toLowerCase();
+    var e=by.get(k)||{name:r.performer,parts:new Map(),shows:new Set()};e.parts.set(p.showId+"|"+r.role.toLowerCase(),r.role+" in "+p.showTitle);e.shows.add(p.showId);by.set(k,e);});});
+  return Array.from(by.values()).filter(function(e){return e.parts.size>1;})
+    .sort(function(a,b){return b.shows.size-a.shows.size||b.parts.size-a.parts.size||a.name.localeCompare(b.name);});
+}
+function yearChart(mine){
+  var counts=new Map();mine.forEach(function(p){var y=String(p.date).slice(0,4);counts.set(y,(counts.get(y)||0)+1);});
+  var years=Array.from(counts.keys()).sort(),first=+years[0],last=+years[years.length-1],max=Math.max.apply(null,Array.from(counts.values()));
+  var box=h("div",{class:"years",role:"img","aria-label":"Nights per year: "+years.map(function(y){return y+" "+counts.get(y);}).join(", ")});
+  var span=last-first+1,step=span>14?Math.ceil(span/14):1;
+  for(var y=first;y<=last;y++){var n=counts.get(String(y))||0,bar=h("i");bar.style.height=(n?Math.max(8,Math.round(n/max*100)):2)+"%";if(!n)bar.className="zero";
+    box.appendChild(h("div",{class:"yr",title:y+": "+plural(n,"night","nights")},h("b",{text:n?String(n):""}),bar,h("span",{text:(y-first)%step===0||y===last?"’"+String(y).slice(2):""})));}
+  return box;
+}
+function thisWeek(mine){
+  var now=new Date(),hits=mine.filter(function(p){if(!validDate(p.date))return false;var d=p.date.split("-");
+    if(+d[0]>=now.getFullYear()) return false;
+    var then=new Date(now.getFullYear(),+d[1]-1,+d[2]);return Math.abs(then-now)<=3.5*86400000;});
+  if(!hits.length) return null;
+  var box=h("div",{class:"stack"});
+  hits.forEach(function(p){var yrs=now.getFullYear()-(+p.date.slice(0,4));box.appendChild(nightCard(p,plural(yrs,"year","years")+" ago this week · "+p.theatre));});
+  return section("This week in your theatre history",box);
+}
 function viewMe(){
   var mine=allPerfs(function(p){return S.diary.has(p.id);}),t=tally(mine),wrap=[];
   if(!S.user||!mine.length){
@@ -130,21 +214,39 @@ function viewMe(){
       h("h1",{text:"Every night you went, and exactly who was on."}),
       h("p",{class:"muted",style:"margin:0;max-width:60ch",text:"Add the date you saw a show and keep the cast from that performance: principals, understudies, swings. Then follow anyone you've seen across every night in the archive."}),
       h("div",{class:"row"},h("a",{class:"btn primary",href:"#/add",text:"Add a night"}),
-        S.user?null:h("a",{class:"btn",href:"#/sign-in",text:"Sign in"}),h("a",{class:"btn ghost",href:"#/archive",text:"Browse the archive"}))));
+        S.user||S.signIn==="access"?null:h("a",{class:"btn",href:"#/sign-in",text:"Sign in"}),h("a",{class:"btn ghost",href:"#/archive",text:"Browse the archive"}))));
     var recent=allPerfs().slice(0,5);
     if(recent.length) wrap.push(section("Just logged",nightList(recent,""),h("a",{href:"#/archive",text:"See all"})));
     return wrap;
   }
-  wrap.push(h("div",{class:"stack"},h("div",{class:"eyebrow",text:"My shows"}),h("h1",{text:"You've seen "+plural(t.people.length,"performer","performers")+" across "+plural(mine.length,"night","nights")+"."})));
+  wantPhotos(t.people.map(function(e){return e.name;}));
+  var subs=understudyRows(mine),cross=crossovers(mine);
+  wrap.push(h("div",{class:"sechead",style:"align-items:flex-end"},
+    h("div",{class:"stack"},h("div",{class:"eyebrow",text:"My shows"}),h("h1",{text:"You've seen "+plural(t.people.length,"performer","performers")+" across "+plural(mine.length,"night","nights")+"."})),
+    h("button",{type:"button",class:"btn small",text:"Share my year",onclick:function(){shareYear(mine);}})));
   wrap.push(h("div",{class:"bento"},
     h("div",{class:"card stat lead"},h("b",{text:String(mine.length)}),h("span",{text:mine.length===1?"night at the theatre":"nights at the theatre"})),
     h("div",{class:"card stat"},h("b",{text:String(t.shows.length)}),h("span",{text:t.shows.length===1?"show":"shows"})),
-    h("div",{class:"card stat"},h("b",{text:String(t.theatres.length)}),h("span",{text:t.theatres.length===1?"theatre":"theatres"}))));
+    h("div",{class:"card stat"},h("b",{text:String(t.theatres.length)}),h("span",{text:t.theatres.length===1?"theatre":"theatres"})),
+    h("div",{class:"card stat"},h("b",{text:String(subs.length)}),h("span",{text:subs.length===1?"understudy you saw go on":"understudies you saw go on"})),
+    h("div",{class:"card stat"},h("b",{text:String(cross.length)}),h("span",{text:cross.length===1?"performer seen in more than one role":"performers seen in more than one role"})),
+    h("div",{class:"card stat wide"},h("span",{class:"lab",text:"Nights by year"}),yearChart(mine))));
+  wrap.push(thisWeek(mine));
   wrap.push(h("div",{class:"grid2"},
     section("Most seen performers",barList(performerRows(t.people,6))),
     h("div",{class:"stack",style:"gap:26px"},
       section("Shows you return to",barList(t.shows.slice(0,3).map(function(s){return {icon:tile(s.p.showTitle),label:linkShow(s.p),n:s.n};}))),
       section("Your theatres",barList(t.theatres.slice(0,3).map(function(x){return {label:linkTheatre(x.name),n:x.n};}))))));
+  if(cross.length){var cb=h("div",{class:"card cast"});
+    cross.slice(0,12).forEach(function(e){cb.appendChild(h("div",{class:"castline"},avatar(e.name),
+      h("div",{class:"who"},linkPerformer(e.name),h("div",{class:"role",text:Array.from(e.parts.values()).join(" · ")})),
+      h("span",{class:"chip plain",text:e.shows.size>1?plural(e.shows.size,"show","shows"):plural(e.parts.size,"role","roles")})));});
+    wrap.push(section("Crossovers: seen in more than one role",cb));}
+  if(subs.length){var ub=h("div",{class:"card cast"});
+    subs.forEach(function(x){ub.appendChild(h("a",{class:"castline linkrow",href:"#/night/"+encodeURIComponent(x.p.id)},avatar(x.r.performer),
+      h("div",{class:"who"},h("b",{text:x.r.performer}),h("div",{class:"role",text:x.r.role+" · "+x.p.showTitle+" · "+fmtDate(x.p.date,{month:"short",day:"numeric",year:"numeric"})})),
+      h("span",{class:"chip warn plain",text:statusName(x.r.status)})));});
+    wrap.push(section("Understudies you saw go on",ub));}
   wrap.push(section("Your nights",nightList(mine,"")));
   return wrap;
 }
@@ -175,6 +277,7 @@ function viewNight(id){
   var p=S.perfs.get(id);
   if(!p) return [h("div",{class:"note",text:S.ready?"That performance isn't in the archive.":"Loading…"})];
   var d=S.diary.get(id),cast=h("div",{class:"card cast"});
+  wantPhotos(cleanCast(p.cast).map(function(r){return r.performer;}).filter(Boolean));
   cleanCast(p.cast).forEach(function(r){
     var seen=allPerfs(function(x){return S.diary.has(x.id)&&x.cast.some(function(c){return same(c.performer,r.performer);});}).length;
     cast.appendChild(h("div",{class:"castline"},avatar(r.performer),
@@ -187,6 +290,7 @@ function viewNight(id){
     if(!S.user){go("sign-in");return;}
     try{var r=await send("POST","/api/attendance/"+encodeURIComponent(id));S.diary.set(id,r.attendance);render();}catch(e){banner(e.message,true);}}}));
   acts.appendChild(h("button",{type:"button",class:"btn small",text:"Fix the cast",onclick:function(){editPerf(id);}}));
+  acts.appendChild(h("button",{type:"button",class:"btn small",text:"Share this night",onclick:function(){shareNight(p);}}));
   if(d) acts.appendChild(h("button",{type:"button",class:"btn small ghost",text:"Remove from my shows",onclick:async function(){
     try{await api("/api/attendance/"+encodeURIComponent(id),{method:"DELETE"});S.diary.delete(id);render();}catch(e){banner(e.message,true);}}}));
   var meta=h("div",{class:"meta"},fmtDate(p.date)+" · "+slotName(p.slot)+" · ");
@@ -205,48 +309,116 @@ function viewShow(id){
   var s=S.shows.get(id),perfs=allPerfs(function(p){return p.showId===id;});
   if(!s) return [h("div",{class:"note",text:S.ready?"That show isn't in the archive.":"Loading…"})];
   var roles=new Map();
-  perfs.forEach(function(p){cleanCast(p.cast).forEach(function(r){var m=roles.get(r.role)||new Map();m.set(r.performer,(m.get(r.performer)||0)+1);roles.set(r.role,m);});});
+  perfs.forEach(function(p){cleanCast(p.cast).forEach(function(r){var m=roles.get(r.role)||new Map();var e=m.get(r.performer)||{n:0,mine:0};e.n++;if(S.diary.has(p.id))e.mine++;m.set(r.performer,e);roles.set(r.role,m);});});
   var roleBox=h("div",{class:"card cast"});
   Array.from(roles.entries()).forEach(function(e){
     var names=h("div",{class:"chips"});
-    Array.from(e[1].entries()).sort(function(a,b){return b[1]-a[1];}).forEach(function(x){
-      names.appendChild(h("a",{class:"chip plain",href:"#/performer/"+encodeURIComponent(x[0]),text:x[0]+(x[1]>1?"  ×"+x[1]:"")}));});
+    Array.from(e[1].entries()).sort(function(a,b){return b[1].n-a[1].n;}).forEach(function(x){
+      names.appendChild(h("a",{class:"chip plain"+(x[1].mine?" seen":""),href:"#/performer/"+encodeURIComponent(x[0]),title:x[1].mine?"You saw them in this role":null,text:x[0]+(x[1].n>1?"  ×"+x[1].n:"")}));});
     roleBox.appendChild(h("div",{class:"castline",style:"align-items:flex-start"},h("div",{class:"who",style:"flex:0 0 34%"},h("div",{style:"font-weight:700",text:e[0]})),names));});
   var meta=h("div",{class:"meta"});
   if(s.theatre) meta.appendChild(linkTheatre(s.theatre));
   meta.appendChild(document.createTextNode([s.location?", "+s.location:"",s.opened?" · Opened "+fmtDate(s.opened,{year:"numeric",month:"long",day:"numeric"}):""].join("")));
+  var nights=splitNights(perfs,"Nobody has logged a night at this show yet.");
   return [h("div",{class:"hero"},tile(s.title,true),h("div",null,h("div",{class:"eyebrow",text:"Show"}),h("h1",{text:s.title}),meta)),
-    h("div",{class:"row"},h("button",{type:"button",class:"btn primary",text:"Add a night at this show",onclick:function(){S.form=blankForm();S.form.showId=id;loadCastForKey();go("add");}})),
-    roles.size?section("Who has played each role",roleBox):null,
-    section(plural(perfs.length,"performance","performances")+" logged",nightList(perfs,"Nobody has logged a night at this show yet."))];
+    historyLine(nights.mine,"You've been"),
+    h("div",{class:"row",style:"align-items:center"},h("button",{type:"button",class:"btn primary",text:"Add a night at this show",onclick:function(){S.form=blankForm();S.form.showId=id;loadCastForKey();go("add");}}),linksOut("show",s.title)),
+    roles.size?section("Who has played each role",roleBox,S.user?h("span",{class:"muted small",text:"Highlighted: you saw them"}):null):null].concat(nights.parts);
 }
 function viewPerformer(name){
   ensure("performer",name);
   var perfs=allPerfs(function(p){return p.cast.some(function(c){return same(c.performer,name);});});
   var shown=name; perfs.some(function(p){return p.cast.some(function(c){if(same(c.performer,name)){shown=c.performer;return true;}});});
-  var roles=new Map(),mine=0;
-  perfs.forEach(function(p){if(S.diary.has(p.id))mine++;
-    p.cast.forEach(function(c){if(!same(c.performer,name))return;var k=p.showId+"|"+c.role,e=roles.get(k)||{p:p,role:c.role,n:0};e.n++;roles.set(k,e);});});
-  var rows=Array.from(roles.values()).sort(function(a,b){return b.n-a.n;}).map(function(e){return {icon:tile(e.p.showTitle),label:linkShow(e.p),sub:e.role,n:e.n};});
+  var roles=new Map(),mates=new Map();
+  perfs.forEach(function(p){var mine=S.diary.has(p.id);
+    p.cast.forEach(function(c){
+      if(same(c.performer,name)){var k=p.showId+"|"+c.role,e=roles.get(k)||{p:p,role:c.role,n:0,mine:0};e.n++;if(mine)e.mine++;roles.set(k,e);}
+      else if(mine&&c.performer){var m=mates.get(c.performer.toLowerCase())||{name:c.performer,n:0};m.n++;mates.set(c.performer.toLowerCase(),m);}});});
+  var rows=Array.from(roles.values()).sort(function(a,b){return b.n-a.n;}).map(function(e){
+    return {icon:tile(e.p.showTitle),label:linkShow(e.p),sub:e.role+(e.mine?" · you saw this "+(e.mine===1?"once":e.mine+" times"):""),n:e.n};});
+  var nights=splitNights(perfs,"No performances logged for this performer yet.",function(p){
+    var c=p.cast.find(function(x){return same(x.performer,name);});
+    return (c?c.role+(c.status!=="billed"?" ("+statusName(c.status).toLowerCase()+")":""):"")+" · "+p.theatre;});
+  var mateList=Array.from(mates.values()).sort(function(a,b){return b.n-a.n||a.name.localeCompare(b.name);}).slice(0,12),mateBox=h("div",{class:"chips"});
+  mateList.forEach(function(m){mateBox.appendChild(h("a",{class:"chip plain",href:"#/performer/"+encodeURIComponent(m.name),text:m.name+(m.n>1?"  ×"+m.n:"")}));});
+  entity("performer",shown);
   return [h("div",{class:"hero"},avatar(shown,true),h("div",null,h("div",{class:"eyebrow",text:"Performer"}),h("h1",{text:shown}),
-      h("div",{class:"meta",text:plural(perfs.length,"performance","performances")+" in the archive"+(S.user?" · you've seen "+plural(mine,"of them","of them"):"")}))),
+      h("div",{class:"meta",text:plural(perfs.length,"performance","performances")+" in the archive"}),photoCredit(shown))),
+    historyLine(nights.mine,"You've seen them"),
+    linksOut("performer",shown),
     rows.length?section("Roles",barList(rows)):null,
-    section("Nights",nightList(perfs,"No performances logged for this performer yet.",function(p){
-      var c=p.cast.find(function(x){return same(x.performer,name);});
-      return (c?c.role+(c.status!=="billed"?" ("+statusName(c.status).toLowerCase()+")":""):"")+(S.diary.has(p.id)?" · you were there":"");}))];
+    mateList.length?section("Shared a stage with, on your nights",mateBox):null].concat(nights.parts);
 }
 function viewTheatre(name){
   ensure("theatre",name);
   var perfs=allPerfs(function(p){return same(p.theatre,name);}),t=tally(perfs);
-  var loc=(perfs.find(function(p){return p.location;})||{}).location||"";
+  var shown=perfs.length?perfs[0].theatre:name,loc=(perfs.find(function(p){return p.location;})||{}).location||"";
   var shows=h("div",{class:"chips"});
   Array.from(S.shows.values()).filter(function(s){return same(s.theatre,name);}).forEach(function(s){
     shows.appendChild(h("a",{class:"chip plain",href:"#/show/"+encodeURIComponent(s.id),text:s.title}));});
-  return [h("div",{class:"hero"},h("div",null,h("div",{class:"eyebrow",text:"Theatre"}),h("h1",{text:perfs.length?perfs[0].theatre:name}),
+  wantPhotos(t.people.slice(0,8).map(function(e){return e.name;}));
+  var nights=splitNights(perfs,"No performances logged at this theatre yet.");
+  return [h("div",{class:"hero"},h("div",null,h("div",{class:"eyebrow",text:"Theatre"}),h("h1",{text:shown}),
       h("div",{class:"meta",text:[loc,plural(perfs.length,"performance","performances")+" logged"].filter(Boolean).join(" · ")}))),
+    historyLine(nights.mine,"You've been here"),
+    linksOut("theatre",shown),
     shows.childNodes.length?section("Shows here",shows):null,
-    t.people.length?section("On this stage",barList(performerRows(t.people,8))):null,
-    section("Nights",nightList(perfs,"No performances logged at this theatre yet."))];
+    t.people.length?section("On this stage",barList(performerRows(t.people,8))):null].concat(nights.parts);
+}
+
+/* ---------- share images ---------- */
+function drawCard(lines){ // lines: {eyebrow,title,sub,rows:[{left,right,tag}],stats:[{n,label}],foot}
+  var W=1080,H=1350,c=document.createElement("canvas");c.width=W;c.height=H;var x=c.getContext("2d");
+  var F=function(w,s){return w+" "+s+"px 'Plus Jakarta Sans',system-ui,sans-serif";};
+  x.fillStyle="#0B0B10";x.fillRect(0,0,W,H);
+  var g=x.createRadialGradient(W*0.85,-80,0,W*0.85,-80,900);g.addColorStop(0,"rgba(255,122,89,.34)");g.addColorStop(1,"rgba(255,122,89,0)");x.fillStyle=g;x.fillRect(0,0,W,H);
+  var fit=function(t,max,w,size){x.font=F(w,size);while(x.measureText(t).width>max&&size>24){size-=2;x.font=F(w,size);}return size;};
+  var clip=function(t,max){if(x.measureText(t).width<=max)return t;while(t.length>1&&x.measureText(t+"…").width>max)t=t.slice(0,-1);return t+"…";};
+  var y=120,P=80;
+  x.fillStyle="#9C9CAE";x.font=F(700,26);x.fillText(String(lines.eyebrow||"").toUpperCase().split("").join("\u200A"),P,y);
+  y+=28;var ts=fit(lines.title,W-2*P,800,96);y+=ts;x.fillStyle="#F3F3F7";x.fillText(lines.title,P,y);
+  if(lines.sub){y+=58;x.fillStyle="#9C9CAE";x.font=F(500,32);x.fillText(clip(lines.sub,W-2*P),P,y);}
+  y+=64;
+  if(lines.stats){var w=(W-2*P-2*24)/3;lines.stats.slice(0,3).forEach(function(s,i){var bx=P+i*(w+24);
+      x.fillStyle="#14141B";x.beginPath();x.roundRect(bx,y,w,190,28);x.fill();
+      x.fillStyle="#F3F3F7";x.font=F(800,84);x.fillText(String(s.n),bx+28,y+104);
+      x.fillStyle="#9C9CAE";x.font=F(500,26);x.fillText(clip(s.label,w-56),bx+28,y+152);});y+=190+56;}
+  var rows=lines.rows||[],room=H-170-y,rh=Math.min(74,Math.max(46,Math.floor(room/Math.max(rows.length,1)))),maxRows=Math.floor(room/rh);
+  var shown=rows.slice(0,rows.length>maxRows?maxRows-1:maxRows),fs=Math.round(rh*0.46);
+  shown.forEach(function(r){
+    x.strokeStyle="rgba(255,255,255,.10)";x.lineWidth=2;x.beginPath();x.moveTo(P,y);x.lineTo(W-P,y);x.stroke();
+    var by=y+rh*0.66;x.textAlign="right";x.font=F(700,fs);x.fillStyle=r.tag?"#FFC466":"#F3F3F7";
+    var right=clip(r.right+(r.tag?"  · "+r.tag:""),W*0.56);x.fillText(right,W-P,by);
+    x.textAlign="left";x.font=F(500,fs);x.fillStyle="#9C9CAE";x.fillText(clip(r.left,W-2*P-x.measureText(right).width-80),P,by);y+=rh;});
+  if(rows.length>shown.length){x.fillStyle="#6C6C7E";x.font=F(500,26);x.fillText("+ "+(rows.length-shown.length)+" more",P,y+rh*0.66);}
+  var ag=x.createLinearGradient(P,0,P+260,0);ag.addColorStop(0,"#FF7A59");ag.addColorStop(1,"#FFB84D");
+  x.fillStyle=ag;x.beginPath();x.arc(P+12,H-88,12,0,Math.PI*2);x.fill();
+  x.fillStyle="#F3F3F7";x.font=F(800,36);x.fillText("Who Was On",P+40,H-76);
+  if(lines.foot){x.textAlign="right";x.fillStyle="#6C6C7E";x.font=F(500,26);x.fillText(lines.foot,W-P,H-78);x.textAlign="left";}
+  return c;
+}
+async function shareCard(lines,filename){
+  try{if(document.fonts&&document.fonts.load) await document.fonts.load("800 96px 'Plus Jakarta Sans'");}catch(e){}
+  var canvas=drawCard(lines);
+  canvas.toBlob(async function(blob){
+    if(!blob){banner("The image couldn't be made in this browser.",true);return;}
+    var file=new File([blob],filename,{type:"image/png"});
+    try{if(navigator.canShare&&navigator.canShare({files:[file]})){await navigator.share({files:[file],title:lines.title});return;}}
+    catch(e){if(e&&e.name==="AbortError")return;}
+    var a=h("a",{href:URL.createObjectURL(blob),download:filename});document.body.appendChild(a);a.click();a.remove();
+    banner("Image saved to your downloads.");
+  },"image/png");
+}
+function shareNight(p){
+  shareCard({eyebrow:"At this performance",title:p.showTitle,sub:[fmtDate(p.date),slotName(p.slot),p.theatre].filter(Boolean).join(" · "),
+    rows:cleanCast(p.cast).map(function(r){return {left:r.role,right:r.performer,tag:r.status!=="billed"?statusName(r.status):""};}),
+    foot:S.diary.has(p.id)?"I was there":""},"who-was-on-"+p.id+".png");
+}
+function shareYear(mine){
+  var year=String(mine[0].date).slice(0,4),these=mine.filter(function(p){return String(p.date).slice(0,4)===year;}),t=tally(these);
+  shareCard({eyebrow:"My year at the theatre",title:year,sub:these.length===mine.length?"":plural(mine.length,"night","nights")+" logged all-time",
+    stats:[{n:these.length,label:these.length===1?"night":"nights"},{n:t.shows.length,label:t.shows.length===1?"show":"shows"},{n:t.people.length,label:"performers seen"}],
+    rows:these.slice().reverse().map(function(p){return {left:fmtDate(p.date,{month:"short",day:"numeric"}),right:p.showTitle,tag:""};})},"who-was-on-"+year+".png");
 }
 
 /* ---------- sign in ---------- */

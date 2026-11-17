@@ -223,7 +223,7 @@ async function me(env, user) {
   return json({ user: { email: user.email }, signIn, attendance: att.results, performances: attachCast(perfs.results, cast.results) });
 }
 
-async function savePerformance(req, env, user) {
+async function savePerformance(req, env, user, ctx) {
   const b = await req.json().catch(() => null);
   if (!b) return fail("Nothing to save.");
   const date = text(b.date, 10), slot = b.slot === "mat" ? "mat" : "eve";
@@ -282,7 +282,9 @@ async function savePerformance(req, env, user) {
         "ON CONFLICT(user_id, performance_id) DO UPDATE SET seat = ?3, note = ?4",
     ).bind(user.id, id, attendance.seat, attendance.note).run();
   }
-  return json({ performance: await getPerformance(env, id), attendance });
+  const saved = await getPerformance(env, id);
+  if (changed && ctx) ctx.waitUntil(warmEntities(env, saved));
+  return json({ performance: saved, attendance });
 }
 
 async function attend(env, user, perfId, on) {
@@ -293,6 +295,138 @@ async function attend(env, user, perfId, on) {
   if (!(await env.DB.prepare("SELECT id FROM performances WHERE id = ?").bind(perfId).first())) return fail("That performance isn't in the archive.", 404);
   await env.DB.prepare("INSERT OR IGNORE INTO attendance (user_id, performance_id) VALUES (?, ?)").bind(user.id, perfId).run();
   return json({ attendance: { perfId, seat: "", note: "" } });
+}
+
+/* ---------- links out and photos (Wikidata) ----------
+   Each performer, show and theatre is matched once against Wikidata, which carries the Wikipedia article,
+   the IBDB id and, for people, a freely licensed photo on Wikimedia Commons. Matching is deliberately
+   strict: a wrong person's photo is worse than no photo. Unmatched names fall back to search links. */
+
+const WD_AGENT = "WhoWasOn/1.0 (https://github.com/sleepovertrading/who-was-on)";
+const STAGE_JOBS = ["Q33999", "Q2259451", "Q10800557", "Q10798782", "Q177220", "Q5716684", "Q2405480", "Q488205", "Q2490358", "Q3282637"];
+const IBDB = {
+  performer: { prop: "P1220", url: (id) => "https://www.ibdb.com/person.php?id=" + id },
+  show: { prop: "P1219", url: (id) => "https://www.ibdb.com/show.php?id=" + id },
+  theatre: { prop: "P1217", url: (id) => "https://www.ibdb.com/venue.php?id=" + id },
+};
+const plain = (s) => String(s || "").toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, " ").replace(/^the /, "").trim();
+
+async function wiki(host, params) {
+  const u = new URL(`https://${host}/w/api.php`);
+  for (const [k, v] of Object.entries({ ...params, format: "json" })) u.searchParams.set(k, v);
+  const res = await fetch(u, { headers: { "user-agent": WD_AGENT, accept: "application/json" } });
+  if (!res.ok) throw new Error("wikidata " + res.status);
+  return res.json();
+}
+const claimValues = (e, prop) => (e.claims?.[prop] || []).map((c) => c.mainsnak?.datavalue?.value).filter((v) => v != null);
+
+function chooseMatch(kind, name, entities) {
+  const want = plain(name);
+  const named = Object.values(entities).filter((e) => {
+    const names = [e.labels?.en?.value, ...(e.aliases?.en || []).map((a) => a.value)];
+    // Shows are often labelled "Hamilton (musical)" or carry a subtitle, so compare the leading title.
+    return names.some((n) => plain(n) === want || (kind === "show" && plain(String(n).split(/[(:]/)[0]) === want));
+  });
+  const ibdbProp = IBDB[kind].prop;
+  const withIbdb = named.filter((e) => claimValues(e, ibdbProp).length);
+  if (withIbdb.length === 1) return withIbdb[0];
+  if (kind === "show" && withIbdb.length > 1) {
+    // A title shared by an old play and a musical (Hamilton, Merrily We Roll Along): take the musical if there is exactly one.
+    const musicals = withIbdb.filter((e) => claimValues(e, "P31").some((v) => v.id === "Q2743" || v.id === "Q58483083"));
+    if (musicals.length === 1) return musicals[0];
+  }
+  if (withIbdb.length > 1 || kind !== "performer") return null; // ambiguous, or a show/theatre IBDB doesn't know
+  const people = named.filter((e) => claimValues(e, "P31").some((v) => v.id === "Q5"));
+  const onStage = people.filter((e) => claimValues(e, "P106").some((v) => STAGE_JOBS.includes(v.id)));
+  return people.length === 1 && onStage.length === 1 ? onStage[0] : null; // only when there is no namesake
+}
+
+async function lookupEntity(kind, name) {
+  // First ask only for items that carry an IBDB id of the right kind; that cuts out almost every namesake.
+  const strict = await wiki("www.wikidata.org", { action: "query", list: "search", srsearch: `${name} haswbstatement:${IBDB[kind].prop}`, srlimit: "8", srnamespace: "0" });
+  let ids = (strict.query?.search || []).map((x) => x.title).filter((t) => /^Q\d+$/.test(t));
+  if (!ids.length && kind === "performer") {
+    const found = await wiki("www.wikidata.org", { action: "wbsearchentities", search: name, language: "en", uselang: "en", type: "item", limit: "8" });
+    ids = (found.search || []).map((x) => x.id);
+  }
+  const out = { qid: null, wikipedia: null, ibdb: null, image: null, image_page: null, image_credit: null };
+  if (!ids.length) return out;
+  const got = await wiki("www.wikidata.org", { action: "wbgetentities", ids: ids.join("|"), props: "claims|sitelinks|labels|aliases", languages: "en", sitefilter: "enwiki" });
+  const e = chooseMatch(kind, name, got.entities || {});
+  if (!e) return out;
+  out.qid = e.id;
+  const page = e.sitelinks?.enwiki?.title;
+  if (page) out.wikipedia = "https://en.wikipedia.org/wiki/" + encodeURIComponent(page.replace(/ /g, "_"));
+  const ibdbId = claimValues(e, IBDB[kind].prop)[0];
+  if (ibdbId) out.ibdb = IBDB[kind].url(encodeURIComponent(ibdbId));
+  const file = kind === "performer" ? claimValues(e, "P18")[0] : null;
+  if (file) {
+    try {
+      const info = await wiki("commons.wikimedia.org", { action: "query", titles: "File:" + file, prop: "imageinfo", iiprop: "url|extmetadata", iiurlwidth: "320" });
+      const ii = Object.values(info.query?.pages || {})[0]?.imageinfo?.[0];
+      const meta = ii?.extmetadata || {};
+      const strip = (h) => String(h || "").replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
+      if (ii?.thumburl && meta.LicenseShortName?.value) {
+        out.image = ii.thumburl;
+        out.image_page = ii.descriptionurl || null;
+        out.image_credit = [strip(meta.Artist?.value).slice(0, 80), strip(meta.LicenseShortName.value)].filter(Boolean).join(", ");
+      }
+    } catch (e2) { /* links still stand without the photo */ }
+  }
+  return out;
+}
+
+const entityOut = (r) => ({ kind: r.kind, key: r.key, matched: !!r.qid, wikipedia: r.wikipedia, ibdb: r.ibdb, image: r.image, imagePage: r.image_page, imageCredit: r.image_credit });
+
+async function resolveEntity(env, kind, name) {
+  const key = name.toLowerCase();
+  const row = await env.DB.prepare("SELECT * FROM entities WHERE kind = ? AND key = ?").bind(kind, key).first();
+  const maxAge = row?.qid ? 90 * 86400 : 7 * 86400;
+  if (row && now() - row.checked_at < maxAge) return row;
+  let found;
+  try { found = await lookupEntity(kind, name); } catch (e) { return row || { kind, key, name }; } // Wikidata busy: try again another time
+  const fresh = { kind, key, name, ...found, checked_at: now() };
+  await env.DB.prepare(
+    "INSERT INTO entities (kind, key, name, qid, wikipedia, ibdb, image, image_page, image_credit, checked_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) " +
+      "ON CONFLICT(kind, key) DO UPDATE SET name=?3, qid=?4, wikipedia=?5, ibdb=?6, image=?7, image_page=?8, image_credit=?9, checked_at=?10",
+  ).bind(kind, key, name, fresh.qid, fresh.wikipedia, fresh.ibdb, fresh.image, fresh.image_page, fresh.image_credit, fresh.checked_at).run();
+  return fresh;
+}
+
+// Only names that are already in the archive can be looked up, so this can't be used as an open proxy.
+async function knownName(env, kind, name) {
+  const q = {
+    performer: "SELECT performer AS n FROM performance_cast WHERE lower(performer) = lower(?1) UNION SELECT performer FROM show_company WHERE lower(performer) = lower(?1) LIMIT 1",
+    show: "SELECT title AS n FROM shows WHERE lower(title) = lower(?1) LIMIT 1",
+    theatre: "SELECT theatre AS n FROM performances WHERE lower(theatre) = lower(?1) UNION SELECT theatre FROM shows WHERE lower(theatre) = lower(?1) LIMIT 1",
+  }[kind];
+  const row = q ? await env.DB.prepare(q).bind(name).first() : null;
+  return row ? row.n : null;
+}
+
+async function getEntity(env, url) {
+  const kind = url.searchParams.get("kind"), name = text(url.searchParams.get("name"));
+  const known = name && (await knownName(env, kind, name));
+  if (!known) return json({ entity: null });
+  return json({ entity: entityOut(await resolveEntity(env, kind, known)) });
+}
+
+// Photos and links already on file for a list of performers (no lookups, so lists stay fast).
+async function listEntities(env, req) {
+  const body = await req.json().catch(() => ({}));
+  const names = [...new Set((Array.isArray(body.names) ? body.names : []).map((n) => text(n).toLowerCase()).filter(Boolean))].slice(0, 90);
+  if (!names.length) return json({ entities: [] });
+  const rows = await env.DB.prepare(`SELECT * FROM entities WHERE kind = 'performer' AND key IN (${names.map(() => "?").join(",")})`).bind(...names).all();
+  return json({ entities: rows.results.map(entityOut) });
+}
+
+// After a save, quietly match that night's show, theatre and cast so their pages are ready.
+async function warmEntities(env, perf) {
+  const jobs = [["show", perf.showTitle], ["theatre", perf.theatre], ...perf.cast.slice(0, 40).map((c) => ["performer", c.performer])];
+  for (const [kind, name] of jobs) {
+    if (!name) continue;
+    try { await resolveEntity(env, kind, name); } catch (e) { /* best effort */ }
+  }
 }
 
 /* ---------- Playbill scan ---------- */
@@ -347,7 +481,7 @@ async function scan(req, env, user) {
 /* ---------- router ---------- */
 
 export default {
-  async fetch(req, env) {
+  async fetch(req, env, ctx) {
     const url = new URL(req.url);
     if (!url.pathname.startsWith("/api/")) return env.ASSETS.fetch(req);
     const path = url.pathname.slice(4), method = req.method;
@@ -356,6 +490,8 @@ export default {
       if (method !== "GET" && req.headers.get("origin") && req.headers.get("origin") !== url.origin) return fail("Cross-site requests are not allowed.", 403);
       if (method === "GET" && path === "/shows") return listShows(env);
       if (method === "GET" && path === "/performances") return listPerformances(env, url);
+      if (method === "GET" && path === "/entity") return getEntity(env, url);
+      if (method === "POST" && path === "/entities") return listEntities(env, req);
       if (method === "POST" && path === "/auth/request") return authRequest(req, env);
       if (method === "POST" && path === "/auth/verify") return authVerify(req, env);
       if (method === "POST" && path === "/auth/logout") return authLogout(req, env);
@@ -364,7 +500,7 @@ export default {
       if (method === "GET" && path === "/me") return me(env, user);
       if (!user && env.ACCESS_TEAM) return fail("Your sign-in has expired. Reload the page to sign in again.", 401);
       if (!user) return fail("Sign in to do that.", 401);
-      if (method === "PUT" && path === "/performances") return savePerformance(req, env, user);
+      if (method === "PUT" && path === "/performances") return savePerformance(req, env, user, ctx);
       if (method === "POST" && path === "/scan") return scan(req, env, user);
       const m = path.match(/^\/attendance\/([A-Za-z0-9_-]{1,120})$/);
       if (m && method === "POST") return attend(env, user, m[1], true);
