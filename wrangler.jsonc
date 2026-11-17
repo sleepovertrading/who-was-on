@@ -1,0 +1,27 @@
+{
+  // Who Was On: one Cloudflare Worker serves the site (public/) and the API (/api/*), with a D1 database.
+  "name": "who-was-on",
+  "main": "src/worker.js",
+  "compatibility_date": "2025-09-01",
+  "assets": { "directory": "./public", "binding": "ASSETS" },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "who-was-on",
+      // Replace after `wrangler d1 create who-was-on`.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    "ANTHROPIC_MODEL": "claude-sonnet-5-5",
+    // PRIVATE BETA: while ACCESS_TEAM is set, Cloudflare Access (free) guards the whole site and handles sign-in.
+    // Set it to your Zero Trust team name. Remove it to switch to the public email-code sign-in below.
+    "ACCESS_TEAM": "",
+    // PUBLIC LAUNCH: an address on a domain added to Cloudflare Email Service.
+    "MAIL_FROM": "login@example.com"
+  }
+  // PUBLIC LAUNCH (needs the Workers Paid plan): uncomment so the site can email sign-in codes itself.
+  // , "send_email": [{ "name": "EMAIL" }]
+  // Secret (set with `wrangler secret put`): ANTHROPIC_API_KEY
+}
