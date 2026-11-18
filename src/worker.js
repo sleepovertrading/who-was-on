@@ -232,24 +232,25 @@ async function savePerformance(req, env, user, ctx) {
   const cast = cleanCast(b.cast);
   if (!validDate(date)) return fail("Pick the date you went.");
   if (Date.parse(date + "T00:00:00Z") > Date.now() + 86400000) return fail("That date hasn't happened yet.");
-  if (!theatre) return fail("Type the theatre's name.");
   if (!cast.length) return fail("Add at least one role and performer.");
 
   let show = null;
-  if (b.showId) show = await env.DB.prepare("SELECT id, opened FROM shows WHERE id = ?").bind(text(b.showId, 80)).first();
+  if (b.showId) show = await env.DB.prepare("SELECT id, opened, theatre FROM shows WHERE id = ?").bind(text(b.showId, 80)).first();
   if (!show) {
     const title = text(b.newTitle);
     const id = slug(title);
     if (!id) return fail("Type the show's title.");
-    const all = await env.DB.prepare("SELECT id, title, opened FROM shows").all();
+    const all = await env.DB.prepare("SELECT id, title, opened, theatre FROM shows").all();
     show = all.results.find((s) => normTitle(s.title) === normTitle(title)) || null;
     if (!show) {
       await env.DB.prepare("INSERT INTO shows (id, title, theatre, location, source) VALUES (?, ?, ?, ?, 'user')")
         .bind(id, title, theatre, location).run();
-      show = { id, opened: null };
+      show = { id, opened: null, theatre };
     }
   }
 
+  // The theatre is optional (people often don't remember it). If this show has none on file yet, keep the first one given.
+  if (theatre && !show.theatre) await env.DB.prepare("UPDATE shows SET theatre = ?, location = ? WHERE id = ? AND theatre = ''").bind(theatre, location, show.id).run();
   const id = `${show.id}_${date}_${slot}`;
   const prev = await getPerformance(env, id);
   let scanned = false;

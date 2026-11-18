@@ -205,7 +205,7 @@ function thisWeek(mine){
     var then=new Date(now.getFullYear(),+d[1]-1,+d[2]);return Math.abs(then-now)<=3.5*86400000;});
   if(!hits.length) return null;
   var box=h("div",{class:"stack"});
-  hits.forEach(function(p){var yrs=now.getFullYear()-(+p.date.slice(0,4));box.appendChild(nightCard(p,plural(yrs,"year","years")+" ago this week · "+p.theatre));});
+  hits.forEach(function(p){var yrs=now.getFullYear()-(+p.date.slice(0,4));box.appendChild(nightCard(p,plural(yrs,"year","years")+" ago this week"+(p.theatre?" · "+p.theatre:"")));});
   return section("This week in your theatre history",box);
 }
 function viewMe(){
@@ -296,7 +296,7 @@ function viewNight(id){
   acts.appendChild(h("button",{type:"button",class:"btn small",text:"Share this night",onclick:function(){shareNight(p);}}));
   if(d) acts.appendChild(h("button",{type:"button",class:"btn small ghost",text:"Remove from my shows",onclick:async function(){
     try{await api("/api/attendance/"+encodeURIComponent(id),{method:"DELETE"});S.diary.delete(id);render();}catch(e){banner(e.message,true);}}}));
-  var meta=h("div",{class:"meta"},fmtDate(p.date)+" · "+slotName(p.slot)+" · ");
+  var meta=h("div",{class:"meta"},fmtDate(p.date)+" · "+slotName(p.slot)+(p.theatre?" · ":""));
   if(p.theatre) meta.appendChild(linkTheatre(p.theatre));
   if(p.location) meta.appendChild(document.createTextNode(", "+p.location));
   return [h("div",{class:"hero"},tile(p.showTitle,true),h("div",null,h("div",{class:"eyebrow",text:"At this performance"}),
@@ -341,7 +341,7 @@ function viewPerformer(name){
     return {icon:tile(e.p.showTitle),label:linkShow(e.p),sub:e.role+(e.mine?" · you saw this "+(e.mine===1?"once":e.mine+" times"):""),n:e.n};});
   var nights=splitNights(perfs,"No performances logged for this performer yet.",function(p){
     var c=p.cast.find(function(x){return same(x.performer,name);});
-    return (c?c.role+(c.status!=="billed"?" ("+statusName(c.status).toLowerCase()+")":""):"")+" · "+p.theatre;});
+    return (c?c.role+(c.status!=="billed"?" ("+statusName(c.status).toLowerCase()+")":""):"")+(p.theatre?" · "+p.theatre:"");});
   var mateList=Array.from(mates.values()).sort(function(a,b){return b.n-a.n||a.name.localeCompare(b.name);}).slice(0,12),mateBox=h("div",{class:"chips"});
   mateList.forEach(function(m){mateBox.appendChild(h("a",{class:"chip plain",href:"#/performer/"+encodeURIComponent(m.name),text:m.name+(m.n>1?"  ×"+m.n:"")}));});
   entity("performer",shown);
@@ -552,8 +552,8 @@ function viewAdd(){
     isNew?h("div",{class:"row"},h("div",{class:"field"},h("label",{for:"f-title",text:"Show title"}),
       h("input",{type:"text",id:"f-title",value:f.newTitle,oninput:function(e){f.newTitle=e.target.value;}}))):null,
     h("div",{class:"row"},
-      h("div",{class:"field"},h("label",{for:"f-theatre",text:"Theatre"}),h("input",{type:"text",id:"f-theatre",value:f.theatre,placeholder:"Richard Rodgers Theatre",oninput:function(e){f.theatre=e.target.value;}})),
-      h("div",{class:"field"},h("label",{for:"f-location",text:"Location"}),h("input",{type:"text",id:"f-location",value:f.location,placeholder:"New York, NY",oninput:function(e){f.location=e.target.value;}}))),
+      h("div",{class:"field"},h("label",{for:"f-theatre",text:"Theatre (optional)"}),h("input",{type:"text",id:"f-theatre",value:f.theatre,placeholder:"Leave blank if you don't remember",oninput:function(e){f.theatre=e.target.value;}})),
+      h("div",{class:"field"},h("label",{for:"f-location",text:"Location (optional)"}),h("input",{type:"text",id:"f-location",value:f.location,placeholder:"New York, NY",oninput:function(e){f.location=e.target.value;}}))),
     help,
     h("div",{class:"stack",style:"gap:8px"},h("h2",{text:"Who was on"}),h("div",{class:"muted small",id:"origin",text:originText()})),
     h("div",{class:"castgrid",id:"castrows"}),
@@ -627,7 +627,6 @@ async function save(){
   if(!S.user){go("sign-in");return;}
   if(!f.showId) return msg("Choose a show first.");
   if(f.showId==="__new"&&!f.newTitle.trim()) return msg("Type the show's title.");
-  if(!f.theatre.trim()) return msg("Type the theatre's name.");
   if(!validDate(f.date)) return msg("Pick the date you went.");
   var cast=cleanCast(f.cast).filter(function(r){return r.role&&r.performer;});
   if(!cast.length) return msg("Add at least one role and performer.");
