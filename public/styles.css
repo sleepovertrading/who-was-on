@@ -173,3 +173,17 @@ details.help[open] summary::before{content:"–"}
 .match{display:flex;align-items:center;gap:10px;text-align:left;background:var(--raised);border:1px solid var(--line);border-radius:12px;padding:6px 10px;cursor:pointer}
 .match:hover{border-color:var(--a2)}
 .match .tile{width:32px;height:32px;border-radius:9px;font-size:12px}
+
+/* per-show look */
+.tile.styled{letter-spacing:0;box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)}
+.showbanner{--h:20;--ink:#fff;--soft:#fff;position:relative;overflow:hidden;border-radius:26px;padding:34px 30px 30px;display:flex;flex-direction:column;gap:10px;
+  background:linear-gradient(135deg,hsl(var(--h) 60% 34%),hsl(calc(var(--h) + 40) 62% 20%));box-shadow:inset 0 0 0 1px rgba(255,255,255,.10)}
+.showbanner::after{content:"";position:absolute;inset:0;pointer-events:none;background:radial-gradient(120% 90% at 100% 0%,rgba(255,255,255,.16),transparent 55%),linear-gradient(0deg,rgba(0,0,0,.22),transparent 60%)}
+.showbanner>*{position:relative;z-index:1}
+.showbanner .eyebrow{color:var(--soft);opacity:.72}
+.showbanner h1{color:var(--ink);font-size:clamp(38px,8.4vw,84px);line-height:.98;letter-spacing:-.01em;font-weight:800}
+.showbanner.styled h1{font-weight:400;letter-spacing:0}
+.showbanner h1 a{color:inherit}
+.showbanner .meta{color:var(--soft);opacity:.86;font-size:15px}
+.showbanner .meta a{color:inherit;font-weight:700;border-bottom:1px solid currentColor}
+@media (max-width:640px){.showbanner{padding:26px 20px 22px;border-radius:20px}}

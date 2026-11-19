@@ -18,6 +18,16 @@ const validDate = (d) => /^\d{4}-\d{2}-\d{2}$/.test(d || "") && !Number.isNaN(Da
 const text = (v, max = 120) => String(v ?? "").trim().slice(0, max);
 const now = () => Math.floor(Date.now() / 1000);
 
+// The model sometimes adds a sentence after its JSON. Read the first complete object and ignore the rest.
+function firstJson(raw) {
+  const start = raw.indexOf("{");
+  if (start < 0) return null;
+  for (let end = raw.indexOf("}", start); end >= 0; end = raw.indexOf("}", end + 1)) {
+    try { return JSON.parse(raw.slice(start, end + 1)); } catch (e) { /* keep looking for the real end */ }
+  }
+  return null;
+}
+
 function cleanCast(input) {
   const out = [];
   for (const r of Array.isArray(input) ? input.slice(0, 80) : []) {
@@ -169,12 +179,18 @@ function attachCast(perfs, castRows) {
   return [...byId.values()];
 }
 
+function showOut(s) {
+  let style = null;
+  try { style = s.style ? JSON.parse(s.style) : null; } catch (e) { /* no style */ }
+  return { id: s.id, title: s.title, theatre: s.theatre, location: s.location, opened: s.opened, closed: s.closed, style, factsSource: s.facts_source || null };
+}
+
 async function listShows(env) {
   const [shows, company] = await env.DB.batch([
-    env.DB.prepare("SELECT id, title, theatre, location, opened, closed FROM shows ORDER BY title"),
+    env.DB.prepare("SELECT id, title, theatre, location, opened, closed, style, facts_source FROM shows ORDER BY title"),
     env.DB.prepare("SELECT show_id, role, performer FROM show_company ORDER BY show_id, position"),
   ]);
-  const byId = new Map(shows.results.map((s) => [s.id, { ...s, company: [] }]));
+  const byId = new Map(shows.results.map((s) => [s.id, { ...showOut(s), company: [] }]));
   for (const c of company.results) byId.get(c.show_id)?.company.push({ role: c.role, performer: c.performer, status: "billed" });
   return json({ shows: [...byId.values()] });
 }
@@ -312,7 +328,73 @@ async function saveShow(req, env, user, id) {
     sets.push(key + " = ?"); vals.push(text(b[key]));
   }
   if (sets.length) await env.DB.prepare(`UPDATE shows SET ${sets.join(", ")} WHERE id = ?`).bind(...vals, id).run();
-  return json({ show: await env.DB.prepare("SELECT id, title, theatre, location, opened, closed FROM shows WHERE id = ?").bind(id).first() });
+  return json({ show: showOut(await env.DB.prepare("SELECT * FROM shows WHERE id = ?").bind(id).first()) });
+}
+
+/* ---------- the site looks a show up for you ----------
+   One web search per show (through the Anthropic API) for the Broadway opening night, theatre and closing date,
+   plus a font and two colours that evoke the production's title treatment. Never overwrites what a person entered. */
+
+const SHOW_FONTS = ["Playfair Display", "Cinzel", "Abril Fatface", "Bebas Neue", "Anton", "Alfa Slab One", "Righteous", "Monoton", "Limelight", "Pacifico",
+  "Permanent Marker", "Creepster", "Bungee", "Lobster", "Oswald", "DM Serif Display", "Special Elite", "Rubik Mono One", "Fredoka", "UnifrakturCook"];
+
+async function lookupShow(req, env, user, id) {
+  if (!env.ANTHROPIC_API_KEY) return fail("Looking shows up isn't set up yet.", 501);
+  const b = await req.json().catch(() => ({}));
+  const show = await env.DB.prepare("SELECT * FROM shows WHERE id = ?").bind(id).first();
+  if (!show) return fail("That show isn't in the archive.", 404);
+  const complete = show.opened && show.theatre && show.style;
+  const wait = complete ? Infinity : 7 * 86400; // try again in a week if something is still missing
+  if (complete || (show.facts_checked_at && now() - show.facts_checked_at < wait)) return json({ show: showOut(show), looked: false });
+  const busy = await env.DB.prepare("SELECT COUNT(*) AS n FROM shows WHERE facts_checked_at > ?").bind(now() - 86400).first();
+  if (busy.n >= 150) return json({ show: showOut(show), looked: false });
+  await env.DB.prepare("UPDATE shows SET facts_checked_at = ? WHERE id = ?").bind(now(), id).run(); // claim it so two visitors don't both search
+
+  const when = validDate(b.date) ? b.date : show.opened || new Date().toISOString().slice(0, 10);
+  const prompt =
+    `Find facts about the stage production of "${show.title}" that was playing on ${when}` + (show.theatre ? ` at ${show.theatre}` : " in New York (Broadway or Off-Broadway)") +
+    ". Search the web (IBDB, Playbill, the Internet Off-Broadway Database, Wikipedia). " +
+    'Then reply with only one JSON object and no other text: {"found": true or false, "opened": "YYYY-MM-DD" or null (official opening night of that production, not the first preview), ' +
+    '"closed": "YYYY-MM-DD" or null (only if it has actually closed), "theatre": string or null, "location": "City, ST" or null, "source": the one URL you relied on most or null, ' +
+    `"font": one of ${JSON.stringify(SHOW_FONTS)} chosen to evoke the lettering style and tone of this production's title treatment, ` +
+    '"color1": "#RRGGBB" the dominant background colour of this production\'s poster or key art, "color2": "#RRGGBB" its main lettering or accent colour}. ' +
+    "Use null for any date, theatre or source you could not confirm; do not guess those. Always give the font and both colours: they are a styling choice, so your best judgement is fine. " +
+    'If you cannot find a production of this title playing around that date, set "found" to false.';
+  let parsed = null;
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+      body: JSON.stringify({
+        model: env.ANTHROPIC_MODEL, max_tokens: 1500,
+        tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 3 }],
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const texts = (data.content || []).filter((c) => c.type === "text").map((c) => c.text);
+      const all = texts.join("\n"), at = all.lastIndexOf('{"found"');
+      parsed = firstJson(at >= 0 ? all.slice(at) : all);
+    }
+  } catch (e) { /* leave the show as it is */ }
+  if (!parsed || typeof parsed !== "object") return json({ show: showOut(show), looked: true, found: false });
+
+  const hex = (v) => (/^#[0-9a-fA-F]{6}$/.test(v || "") ? v.toUpperCase() : null);
+  const style = SHOW_FONTS.includes(parsed.font) && hex(parsed.color1) && hex(parsed.color2) ? JSON.stringify({ font: parsed.font, c1: hex(parsed.color1), c2: hex(parsed.color2) }) : null;
+  const ok = parsed.found !== false;
+  const source = ok && /^https:\/\/[^\s"<>]{4,300}$/.test(parsed.source || "") ? parsed.source : null;
+  const filled = [];
+  const sets = ["style = COALESCE(style, ?)"], vals = [style];
+  if (ok && !show.opened && validDate(parsed.opened)) { sets.push("opened = ?"); vals.push(parsed.opened); filled.push("opening night"); }
+  if (ok && !show.closed && validDate(parsed.closed) && Date.parse(parsed.closed) < Date.now()) { sets.push("closed = ?"); vals.push(parsed.closed); }
+  if (ok && !show.theatre && text(parsed.theatre)) { sets.push("theatre = ?", "location = ?"); vals.push(text(parsed.theatre), show.location || text(parsed.location)); filled.push("theatre"); }
+  if (filled.length && source) { sets.push("facts_source = ?"); vals.push(source); }
+  await env.DB.prepare(`UPDATE shows SET ${sets.join(", ")} WHERE id = ?`).bind(...vals, id).run();
+  const fresh = await env.DB.prepare("SELECT * FROM shows WHERE id = ?").bind(id).first();
+  // Nights logged without a theatre pick up the one just found.
+  if (filled.includes("theatre")) await env.DB.prepare("UPDATE performances SET theatre = ?, location = ? WHERE show_id = ? AND theatre = ''").bind(fresh.theatre, fresh.location, id).run();
+  return json({ show: showOut(fresh), looked: true, found: ok, filled });
 }
 
 /* ---------- unfinished nights ---------- */
@@ -526,7 +608,7 @@ async function scan(req, env, user) {
   const data = await res.json();
   const raw = (data.content || []).filter((c) => c.type === "text").map((c) => c.text).join("");
   let parsed = null;
-  try { parsed = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1)); } catch (e) { /* handled below */ }
+  parsed = firstJson(raw);
   if (!parsed || typeof parsed !== "object") return fail("Nothing readable came back. Try a sharper, straight-on photo of the cast page.", 422);
   const result = {
     show: text(parsed.show) || null,
@@ -569,7 +651,7 @@ async function parsePaste(req, env, user) {
   const data = await res.json();
   const raw = (data.content || []).filter((c) => c.type === "text").map((c) => c.text).join("");
   let parsed = null;
-  try { parsed = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1)); } catch (e) { /* handled below */ }
+  parsed = firstJson(raw);
   const cast = cleanCast(parsed && parsed.cast);
   await env.DB.prepare("INSERT INTO scans (id, user_id, result_json) VALUES (?, ?, ?)").bind("paste_" + randomToken(12), user.id, JSON.stringify({ cast, pasted: true })).run();
   if (!cast.length) return fail("No roles and performers were found in that text.", 422);
@@ -604,6 +686,8 @@ export default {
       if (method === "PUT" && path === "/drafts") return saveDraft(req, env, user);
       const sm = path.match(/^\/shows\/([a-z0-9-]{1,80})$/);
       if (sm && method === "PUT") return saveShow(req, env, user, sm[1]);
+      const lm = path.match(/^\/shows\/([a-z0-9-]{1,80})\/lookup$/);
+      if (lm && method === "POST") return lookupShow(req, env, user, lm[1]);
       const dm = path.match(/^\/drafts\/([a-f0-9]{24})$/);
       if (dm && method === "DELETE") {
         await env.DB.prepare("DELETE FROM drafts WHERE id = ? AND user_id = ?").bind(dm[1], user.id).run();

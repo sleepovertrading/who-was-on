@@ -38,7 +38,46 @@ function route(){var parts=location.hash.replace(/^#\/?/,"").split("/");var arg=
 function hue(s){var n=0;for(var i=0;i<s.length;i++)n=(n*31+s.charCodeAt(i))%360;return n;}
 function initials(s){var w=String(s||"").replace(/^the\s+/i,"").split(/\s+/).filter(Boolean);
   return ((w[0]||"?")[0]+(w.length>1?w[w.length-1][0]:"")).toUpperCase();}
-function tile(title,big){var t=h("span",{class:"tile"+(big?" big":""),"aria-hidden":"true",text:initials(title)});t.style.setProperty("--h",hue(norm(title)));return t;}
+/* Each show can carry a look (a display font and two colours) that evokes its title treatment. No logos or artwork are used. */
+function styleFor(title){var st=null,n=norm(title);S.shows.forEach(function(v){if(!st&&v.style&&norm(v.title)===n)st=v.style;});return st;}
+function lum(hex){var c=[1,3,5].map(function(i){var v=parseInt(hex.slice(i,i+2),16)/255;return v<=0.03928?v/12.92:Math.pow((v+0.055)/1.055,2.4);});return 0.2126*c[0]+0.7152*c[1]+0.0722*c[2];}
+function contrast(a,b){var x=lum(a),y=lum(b);return (Math.max(x,y)+0.05)/(Math.min(x,y)+0.05);}
+function inkOn(bg,want){return want&&contrast(bg,want)>=3.2?want:(lum(bg)>0.4?"#111118":"#FFFFFF");}
+function useFont(name){
+  var id="font-"+slug(name); if(document.getElementById(id)) return;
+  document.head.appendChild(h("link",{id:id,rel:"stylesheet",href:"https://fonts.googleapis.com/css2?family="+encodeURIComponent(name).replace(/%20/g,"+")+"&display=swap"}));
+}
+function tile(title,big){
+  var t=h("span",{class:"tile"+(big?" big":""),"aria-hidden":"true",text:initials(title)}),st=styleFor(title);
+  if(st){useFont(st.font);t.style.background=st.c1;t.style.color=inkOn(st.c1,st.c2);t.style.fontFamily="'"+st.font+"',var(--font)";t.style.fontWeight="400";t.classList.add("styled");}
+  else t.style.setProperty("--h",hue(norm(title)));
+  return t;
+}
+/* The banner at the top of a show's or a night's page, set in that show's look. */
+function showBanner(title,eyebrow,titleNode,meta){
+  var st=styleFor(title),box=h("div",{class:"showbanner"+(st?" styled":"")},h("div",{class:"eyebrow",text:eyebrow}),h("h1",null,titleNode),meta||null);
+  if(st){useFont(st.font);var ink=inkOn(st.c1,st.c2),soft=lum(st.c1)>0.4?"#111118":"#FFFFFF";
+    box.style.background=st.c1;box.style.setProperty("--ink",ink);box.style.setProperty("--soft",soft);
+    box.querySelector("h1").style.fontFamily="'"+st.font+"',var(--font)";}
+  else box.style.setProperty("--h",hue(norm(title)));
+  return box;
+}
+/* Ask the server to look a show up (opening night, theatre, look). The server decides whether a search is really needed. */
+function lookUpShow(showId,date){
+  var s=S.shows.get(showId); S.looked=S.looked||new Set();
+  if(!S.user||!s||S.looked.has(showId)||(s.opened&&s.theatre&&s.style)) return;
+  S.looked.add(showId);
+  send("POST","/api/shows/"+encodeURIComponent(showId)+"/lookup",{date:date||""}).then(function(r){
+    if(!r.show) return; S.shows.set(showId,Object.assign({},S.shows.get(showId)||s,r.show));
+    if(r.filled&&r.filled.indexOf("theatre")>=0) S.perfs.forEach(function(p,k){if(p.showId===showId&&!p.theatre)S.perfs.set(k,Object.assign({},p,{theatre:r.show.theatre,location:r.show.location}));});
+    if(r.filled&&r.filled.length) banner("Found the "+r.filled.join(" and ")+" for "+r.show.title+".");
+    var now=route(); if(now.kind!=="add"&&now.kind!=="sign-in") render();
+  }).catch(function(){});
+}
+function foundBy(s){
+  if(!s||!s.factsSource) return null;
+  return h("div",{class:"credit"},"Opening night and theatre found by web search. ",h("a",{href:s.factsSource,target:"_blank",rel:"noopener",text:"Source ↗"}));
+}
 function avatar(name,big){
   var e=S.ent.get("performer:"+String(name).toLowerCase()),cls="avatar"+(big?" big":"");
   if(!e||!e.image) return h("span",{class:cls,"aria-hidden":"true",text:initials(name)});
@@ -331,12 +370,12 @@ function viewNight(id){
   var meta=h("div",{class:"meta"},fmtDate(p.date)+" · "+slotName(p.slot)+(p.theatre?" · ":""));
   if(p.theatre) meta.appendChild(linkTheatre(p.theatre));
   if(p.location) meta.appendChild(document.createTextNode(", "+p.location));
-  return [h("div",{class:"hero"},tile(p.showTitle,true),h("div",null,h("div",{class:"eyebrow",text:"At this performance"}),
-      h("h1",null,linkShow(p)),meta)),
+  lookUpShow(p.showId,p.date);
+  return [showBanner(p.showTitle,"At this performance",linkShow(p),meta),
     h("div",{class:"row",style:"align-items:center"},statusChip(p),h("span",{class:"muted small",text:plural(p.edits,"edit","edits")}),acts),
     d&&(d.seat||d.note)?h("div",{class:"note",text:[d.seat?"Seat "+d.seat:"",d.note].filter(Boolean).join(" · ")}):null,
     runContext(p.showId,p.date),
-    S.shows.get(p.showId)&&!S.shows.get(p.showId).opened?openingEditor(S.shows.get(p.showId)):null,
+    foundBy(S.shows.get(p.showId)),
     p.cast.length?section("Who was on",cast):section("Who was on",h("div",{class:"card stack"},
       h("div",{class:"muted",text:"No cast added yet. The show and the date are enough to log the night; add the cast whenever you like."}),
       h("div",{class:"row"},h("button",{type:"button",class:"btn primary small",text:"Add the cast",onclick:function(){editPerf(id);S.form.helpOpen=true;}})),
@@ -360,9 +399,11 @@ function viewShow(id){
   if(s.theatre) meta.appendChild(linkTheatre(s.theatre));
   meta.appendChild(document.createTextNode([s.location?", "+s.location:"",s.opened?(s.theatre||s.location?" · ":"")+"Opened "+fmtDate(s.opened,{year:"numeric",month:"long",day:"numeric"}):""].join("")));
   var nights=splitNights(perfs,"Nobody has logged a night at this show yet.");
-  return [h("div",{class:"hero"},tile(s.title,true),h("div",null,h("div",{class:"eyebrow",text:"Show"}),h("h1",{text:s.title}),meta)),
+  lookUpShow(id,nights.mine.length?nights.mine[0].date:"");
+  return [showBanner(s.title,"Show",document.createTextNode(s.title),meta),
     historyLine(nights.mine,"You've been"),
-    !s.opened||S.editOpen?openingEditor(s):(S.user?h("button",{type:"button",class:"linkish small",style:"align-self:flex-start",text:"Fix the opening night",onclick:function(){S.editOpen=true;render();}}):null),
+    foundBy(s),
+    S.editOpen?openingEditor(s):(S.user?h("button",{type:"button",class:"linkish small",style:"align-self:flex-start",text:s.opened?"Fix the opening night":"Add the opening night yourself",onclick:function(){S.editOpen=true;render();}}):null),
     h("div",{class:"row",style:"align-items:center"},h("button",{type:"button",class:"btn primary",text:"Add a night at this show",onclick:function(){S.form=blankForm();S.form.showId=id;loadCastForKey();go("add");}}),linksOut("show",s.title)),
     roles.size?section("Who has played each role",roleBox,S.user?h("span",{class:"muted small",text:"Highlighted: you saw them"}):null):null].concat(nights.parts);
 }
@@ -615,7 +656,7 @@ function viewAdd(){
       h("span",{class:"muted small",role:"status",text:f.pasteMsg||"Looked-up casts stay marked Unconfirmed: they show who was scheduled, not who went on."}))));
 
 
-  var panel=h("form",{class:"panel",onsubmit:function(e){e.preventDefault();save();}},
+  var panel=h("form",{class:"panel",novalidate:true,onsubmit:function(e){e.preventDefault();save();}},
     h("div",{class:"scanbox"},
       h("input",{type:"file",id:"f-scan",accept:"image/*",multiple:true,class:"hide",onchange:function(e){if(e.target.files&&e.target.files.length)runScan(Array.from(e.target.files));e.target.value="";}}),
       h("button",{type:"button",class:"btn primary",id:"scan-btn",disabled:f.busy,text:f.busy?"Reading this page…":f.pages?"Scan another page":"Scan a Playbill",onclick:function(){
@@ -707,6 +748,8 @@ async function save(){
   if(!S.user){go("sign-in");return;}
   resolveShow(f.showText);
   if(!f.showId) return msg("Type the show first.");
+  var dateEl=document.getElementById("f-date");
+  if(dateEl&&dateEl.validity&&dateEl.validity.badInput) return msg("Finish the date: it needs the month, day and year. Not sure? Use “Not sure of the date?” and save for later.");
   if(!validDate(f.date)) return msg("Pick the date you went.");
   var cast=cleanCast(f.cast).filter(function(r){return r.role&&r.performer;});
   var btn=document.getElementById("save-btn"); if(btn)btn.disabled=true; msg("Saving…");
@@ -765,8 +808,8 @@ function viewDraft(id){
   var d=S.drafts.get(id);
   if(!d) return [h("div",{class:"note",text:S.ready?"That unfinished night isn't here any more.":"Loading…"})];
   var when=validDate(d.date)?fmtDate(d.date,{month:"long",year:"numeric"}):d.dateGuess,parts=[
-    h("div",{class:"hero"},tile(d.showTitle,true),h("div",null,h("div",{class:"eyebrow",text:"Unfinished night · only you can see this"}),h("h1",{text:d.showTitle}),
-      h("div",{class:"meta",text:[validDate(d.date)?fmtDate(d.date)+" · "+slotName(d.slot):(d.dateGuess||"Date unknown"),d.theatre].filter(Boolean).join(" · ")}))),
+    showBanner(d.showTitle,"Unfinished night · only you can see this",document.createTextNode(d.showTitle),
+      h("div",{class:"meta",text:[validDate(d.date)?fmtDate(d.date)+" · "+slotName(d.slot):(d.dateGuess||"Date unknown"),d.theatre].filter(Boolean).join(" · ")})),
     h("div",{class:"row",style:"align-items:center"},h("span",{class:"chip warn",text:draftNeeds(d)}),
       h("button",{type:"button",class:"btn primary small",text:"Finish this night",onclick:function(){resumeDraft(d);}}),
       h("button",{type:"button",class:"btn small ghost",text:"Delete",onclick:async function(){
