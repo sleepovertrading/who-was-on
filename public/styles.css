@@ -164,3 +164,4 @@ details.help[open] summary::before{content:"–"}
 .tips{margin:0;padding-left:18px;color:var(--muted);font-size:13px;display:flex;flex-direction:column;gap:4px}
 .nightcard.draft{border-style:dashed}
 .linkish.small{font-size:12.5px;color:var(--muted);text-decoration:underline}
+.context{font-size:14px;color:var(--muted);border-left:3px solid var(--a2);padding:4px 0 4px 12px}

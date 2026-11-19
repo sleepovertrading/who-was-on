@@ -78,6 +78,26 @@ function photoCredit(name){
   if(!e||!e.image) return null;
   return h("div",{class:"credit"},"Photo: ",e.imagePage?h("a",{href:e.imagePage,target:"_blank",rel:"noopener",text:e.imageCredit||"Wikimedia Commons"}):(e.imageCredit||"Wikimedia Commons"));
 }
+/* Where a night falls in the show's run: "Opening night was August 6, 2015 · you saw it 15 weeks into the run". */
+function runContext(showId,date){
+  var s=S.shows.get(showId); if(!s||!validDate(s.opened)||!validDate(date)) return null;
+  var days=Math.round((Date.parse(date)-Date.parse(s.opened))/86400000),open=fmtDate(s.opened,{month:"long",day:"numeric",year:"numeric"}),t;
+  if(days===0) t="This was opening night.";
+  else if(days<0) t="A preview, "+plural(-days,"day","days")+" before opening night ("+open+").";
+  else{var into=days<14?plural(days,"day","days"):days<365?plural(Math.round(days/7),"week","weeks"):(Math.floor(days/365)===1?"1 year":Math.floor(days/365)+" years")+(Math.round((days%365)/30)?" and "+plural(Math.round((days%365)/30),"month","months"):"");
+    t="Opening night was "+open+" · this was "+into+" into the run.";}
+  if(validDate(s.closed)&&date===s.closed) t+=" It was also closing night.";
+  return h("div",{class:"context",text:t});
+}
+function openingEditor(s){
+  var box=h("div",{class:"row",style:"align-items:center;gap:8px"}),val=s.opened||"";
+  var input=h("input",{type:"date",id:"s-opened",value:val,"aria-label":"Opening night",style:"max-width:180px",onchange:function(e){val=e.target.value;}});
+  box.appendChild(h("span",{class:"lab",text:s.opened?"Opening night":"Know the opening night?"}));box.appendChild(input);
+  box.appendChild(h("button",{type:"button",class:"btn small",text:"Save",onclick:async function(){
+    if(!S.user){go("sign-in");return;}
+    try{var r=await send("PUT","/api/shows/"+encodeURIComponent(s.id),{opened:val});S.shows.set(s.id,Object.assign({},s,r.show));S.editOpen=false;render();}catch(e){banner(e.message,true);}}}));
+  return box;
+}
 function monthYear(d){return fmtDate(d,{month:"short",year:"numeric"});}
 /* "You've been 3 times · first Mar 2016 · last Jun 2024" for any set of your own nights (newest first). */
 function historyLine(mine,verb){
@@ -134,6 +154,7 @@ function ensure(kind,arg){
 
 /* ---------- shared pieces ---------- */
 function statusChip(p){
+  if(!p.cast.length) return h("span",{class:"chip plain",text:"Cast not added yet"});
   if(p.verified) return h("span",{class:"chip good",text:"Playbill checked"});
   if(p.source==="opening") return h("span",{class:"chip warn",text:"Opening company"});
   return h("span",{class:"chip warn",text:"Unconfirmed"});
@@ -292,7 +313,7 @@ function viewNight(id){
   else acts.appendChild(h("button",{type:"button",class:"btn primary small",text:"I was there too",onclick:async function(){
     if(!S.user){go("sign-in");return;}
     try{var r=await send("POST","/api/attendance/"+encodeURIComponent(id));S.diary.set(id,r.attendance);render();}catch(e){banner(e.message,true);}}}));
-  acts.appendChild(h("button",{type:"button",class:"btn small",text:"Fix the cast",onclick:function(){editPerf(id);}}));
+  acts.appendChild(h("button",{type:"button",class:"btn small",text:p.cast.length?"Fix the cast":"Add details",onclick:function(){editPerf(id);}}));
   acts.appendChild(h("button",{type:"button",class:"btn small",text:"Share this night",onclick:function(){shareNight(p);}}));
   if(d) acts.appendChild(h("button",{type:"button",class:"btn small ghost",text:"Remove from my shows",onclick:async function(){
     try{await api("/api/attendance/"+encodeURIComponent(id),{method:"DELETE"});S.diary.delete(id);render();}catch(e){banner(e.message,true);}}}));
@@ -303,7 +324,11 @@ function viewNight(id){
       h("h1",null,linkShow(p)),meta)),
     h("div",{class:"row",style:"align-items:center"},statusChip(p),h("span",{class:"muted small",text:plural(p.edits,"edit","edits")}),acts),
     d&&(d.seat||d.note)?h("div",{class:"note",text:[d.seat?"Seat "+d.seat:"",d.note].filter(Boolean).join(" · ")}):null,
-    section("Who was on",cast)];
+    runContext(p.showId,p.date),
+    p.cast.length?section("Who was on",cast):section("Who was on",h("div",{class:"card stack"},
+      h("div",{class:"muted",text:"No cast added yet. The show and the date are enough to log the night; add the cast whenever you like."}),
+      h("div",{class:"row"},h("button",{type:"button",class:"btn primary small",text:"Add the cast",onclick:function(){editPerf(id);S.form.helpOpen=true;}})),
+      lookItUp(p.showTitle,fmtDate(p.date,{month:"long",year:"numeric"}))))];
 }
 
 /* ---------- show, performer, theatre ---------- */
@@ -325,6 +350,7 @@ function viewShow(id){
   var nights=splitNights(perfs,"Nobody has logged a night at this show yet.");
   return [h("div",{class:"hero"},tile(s.title,true),h("div",null,h("div",{class:"eyebrow",text:"Show"}),h("h1",{text:s.title}),meta)),
     historyLine(nights.mine,"You've been"),
+    !s.opened||S.editOpen?openingEditor(s):(S.user?h("button",{type:"button",class:"linkish small",style:"align-self:flex-start",text:"Fix the opening night",onclick:function(){S.editOpen=true;render();}}):null),
     h("div",{class:"row",style:"align-items:center"},h("button",{type:"button",class:"btn primary",text:"Add a night at this show",onclick:function(){S.form=blankForm();S.form.showId=id;loadCastForKey();go("add");}}),linksOut("show",s.title)),
     roles.size?section("Who has played each role",roleBox,S.user?h("span",{class:"muted small",text:"Highlighted: you saw them"}):null):null].concat(nights.parts);
 }
@@ -484,13 +510,16 @@ function loadCastForKey(){
     else{f.cast=[];f.origin="blank";}}
   else{f.cast=[];f.origin="blank";}
   f.scanId=null;f.pages=0;f.dirty=false;
+  // A guessed cast is only a suggestion: it isn't saved unless the person chooses to use it.
+  f.suggest=null;
+  if(f.origin==="nearby"||f.origin==="baseline"||f.origin==="opening"){f.suggest={cast:f.cast,origin:f.origin};f.cast=[];f.origin="blank";}
 }
 /* Pull every logged night for the chosen show, so the starting cast can come from the closest one. */
 function formEnsure(id){
   var key="show:"+String(id).toLowerCase(); if(!id||id==="__new"||S.fetched.has(key)) return; S.fetched.add(key);
   api("/api/performances?show="+encodeURIComponent(id)).then(function(r){
     r.performances.forEach(function(p){S.perfs.set(p.id,p);}); var f=S.form;
-    if(route().kind==="add"&&f.showId===id&&!f.dirty&&!f.pages&&f.origin!=="draft"){var th=f.theatre,lo=f.location;loadCastForKey();if(f.origin!=="nearby"&&f.origin!=="archive"){f.theatre=th;f.location=lo;}renderCastRows();}
+    if(route().kind==="add"&&f.showId===id&&!f.dirty&&!f.pages&&!f.cast.length&&f.origin!=="draft"){var th=f.theatre,lo=f.location;loadCastForKey();if(f.origin!=="nearby"&&f.origin!=="archive"){f.theatre=th;f.location=lo;}renderCastRows();}
   }).catch(function(){S.fetched.delete(key);});
 }
 function originText(){
@@ -500,9 +529,10 @@ function originText(){
   if(f.origin==="draft") return "Picked up from your unfinished night. Check it, then save.";
   if(f.origin==="archive") return "Someone already logged this performance. Fix anything that's wrong, or save as is.";
   if(f.origin==="opening") return "This is opening night, so the opening company is filled in.";
+  if(f.origin==="suggested") return "Starting point only. Change anyone who was different on your night, or remove rows you're not sure of.";
   if(f.origin==="nearby") return "Starting point only: this is the cast logged for "+f.nearText+", the closest night on file. Change anyone who was different on your night.";
   if(f.origin==="baseline") return "Starting point only: this is the opening-night company. Change anyone who was different on your night.";
-  return "No cast on file yet. Scan your Playbill, look it up, or type it in.";
+  return "Optional. The show and date are enough to save the night. Add the cast now, or come back to it.";
 }
 function renderCastRows(){
   var box=document.getElementById("castrows"); if(!box)return; box.textContent="";
@@ -515,10 +545,16 @@ function renderCastRows(){
       sel,h("button",{class:"x",type:"button","aria-label":"Remove this row",text:"×",onclick:function(){S.form.cast.splice(i,1);S.form.dirty=true;renderCastRows();}})));
   });
   var o=document.getElementById("origin"); if(o) o.textContent=originText();
+  var sg=document.getElementById("suggest"); if(sg){sg.textContent="";var su=S.form.suggest;
+    if(su&&!S.form.cast.length){
+      var names=su.cast.slice(0,4).map(function(r){return r.performer;}).join(", ")+(su.cast.length>4?" and "+(su.cast.length-4)+" more":"");
+      var why=su.origin==="opening"?"This is opening night, so this is the opening company":su.origin==="nearby"?"From the closest night on file ("+S.form.nearText+")":"The opening-night company";
+      sg.appendChild(h("div",{class:"scanbox"},h("div",{style:"flex:1 1 260px"},h("div",{style:"font-weight:700",text:"Suggested cast"}),h("div",{class:"muted small",text:why+": "+names+"."})),
+        h("button",{type:"button",class:"btn small",text:"Use as a starting point",onclick:function(){S.form.cast=cleanCast(su.cast);S.form.origin=su.origin==="opening"?"opening":"suggested";renderCastRows();}})));}}
   [["f-theatre","theatre"],["f-location","location"]].forEach(function(x){var n=document.getElementById(x[0]); if(n&&document.activeElement!==n) n.value=S.form[x[1]];});
 }
 function viewAdd(){
-  var f=S.form,isNew=f.showId==="__new",rekey=function(){if(!isNew&&!f.dirty&&!f.pages&&f.origin!=="draft"){loadCastForKey();renderCastRows();}};
+  var f=S.form,isNew=f.showId==="__new",rekey=function(){if(!isNew&&!f.dirty&&!f.pages&&f.origin!=="draft"&&(f.origin==="archive"||!f.cast.length)){loadCastForKey();renderCastRows();}};
   formEnsure(f.showId);
   var sel=h("select",{id:"f-show",onchange:function(e){f.showId=e.target.value;loadCastForKey();render();}});
   sel.appendChild(h("option",{value:"",text:"Choose a show"}));
@@ -556,6 +592,7 @@ function viewAdd(){
       h("div",{class:"field"},h("label",{for:"f-location",text:"Location (optional)"}),h("input",{type:"text",id:"f-location",value:f.location,placeholder:"New York, NY",oninput:function(e){f.location=e.target.value;}}))),
     help,
     h("div",{class:"stack",style:"gap:8px"},h("h2",{text:"Who was on"}),h("div",{class:"muted small",id:"origin",text:originText()})),
+    h("div",{id:"suggest"}),
     h("div",{class:"castgrid",id:"castrows"}),
     h("div",null,h("button",{type:"button",class:"btn small",text:"Add a role",onclick:function(){f.cast.push({role:"",performer:"",status:"billed"});f.dirty=true;renderCastRows();var n=document.getElementById("c-role-"+(f.cast.length-1));if(n)n.focus();}})),
     h("div",{class:"row"},
@@ -629,7 +666,6 @@ async function save(){
   if(f.showId==="__new"&&!f.newTitle.trim()) return msg("Type the show's title.");
   if(!validDate(f.date)) return msg("Pick the date you went.");
   var cast=cleanCast(f.cast).filter(function(r){return r.role&&r.performer;});
-  if(!cast.length) return msg("Add at least one role and performer.");
   var btn=document.getElementById("save-btn"); if(btn)btn.disabled=true; msg("Saving…");
   try{
     var r=await send("PUT","/api/performances",{showId:f.showId==="__new"?null:f.showId,newTitle:f.newTitle,theatre:f.theatre,location:f.location,
@@ -645,7 +681,7 @@ async function save(){
 async function saveLater(){
   var f=S.form,msg=function(t){f.msg=t;var m=document.getElementById("save-msg");if(m)m.textContent=t;};
   if(!f.showId||(f.showId==="__new"&&!f.newTitle.trim())) return msg("Choose a show first. That's all an unfinished night needs.");
-  var keepCast=f.dirty||f.pages||f.origin==="draft";
+  var keepCast=true; // rows are only there if the person typed, scanned, pasted or accepted them
   try{
     var r=await send("PUT","/api/drafts",{id:f.draftId,showId:f.showId==="__new"?null:f.showId,showTitle:f.newTitle,theatre:f.theatre,location:f.location,
       date:f.date,dateGuess:f.dateGuess,slot:f.slot,cast:keepCast?cleanCast(f.cast):[],seat:f.seat,note:f.note});

@@ -228,24 +228,23 @@ async function savePerformance(req, env, user, ctx) {
   const b = await req.json().catch(() => null);
   if (!b) return fail("Nothing to save.");
   const date = text(b.date, 10), slot = b.slot === "mat" ? "mat" : "eve";
-  const theatre = text(b.theatre), location = text(b.location);
-  const cast = cleanCast(b.cast);
+  let theatre = text(b.theatre), location = text(b.location);
+  let cast = cleanCast(b.cast);
   if (!validDate(date)) return fail("Pick the date you went.");
   if (Date.parse(date + "T00:00:00Z") > Date.now() + 86400000) return fail("That date hasn't happened yet.");
-  if (!cast.length) return fail("Add at least one role and performer.");
 
   let show = null;
-  if (b.showId) show = await env.DB.prepare("SELECT id, opened, theatre FROM shows WHERE id = ?").bind(text(b.showId, 80)).first();
+  if (b.showId) show = await env.DB.prepare("SELECT id, opened, theatre, location FROM shows WHERE id = ?").bind(text(b.showId, 80)).first();
   if (!show) {
     const title = text(b.newTitle);
     const id = slug(title);
     if (!id) return fail("Type the show's title.");
-    const all = await env.DB.prepare("SELECT id, title, opened, theatre FROM shows").all();
+    const all = await env.DB.prepare("SELECT id, title, opened, theatre, location FROM shows").all();
     show = all.results.find((s) => normTitle(s.title) === normTitle(title)) || null;
     if (!show) {
       await env.DB.prepare("INSERT INTO shows (id, title, theatre, location, source) VALUES (?, ?, ?, ?, 'user')")
         .bind(id, title, theatre, location).run();
-      show = { id, opened: null, theatre };
+      show = { id, opened: null, theatre, location };
     }
   }
 
@@ -253,6 +252,10 @@ async function savePerformance(req, env, user, ctx) {
   if (theatre && !show.theatre) await env.DB.prepare("UPDATE shows SET theatre = ?, location = ? WHERE id = ? AND theatre = ''").bind(theatre, location, show.id).run();
   const id = `${show.id}_${date}_${slot}`;
   const prev = await getPerformance(env, id);
+  // A show and a date are enough to log a night. Saving without a cast never wipes a cast someone already entered.
+  if (!cast.length && prev) cast = prev.cast;
+  // Likewise a blank theatre never erases one: fall back to what this night, or the show, already has.
+  if (!theatre) { theatre = prev ? prev.theatre : show.theatre || ""; if (!location) location = prev ? prev.location : show.location || ""; }
   let scanned = false;
   if (b.scanId) {
     const scan = await env.DB.prepare("SELECT result_json FROM scans WHERE id = ? AND user_id = ?").bind(text(b.scanId, 64), user.id).first();
@@ -290,6 +293,26 @@ async function savePerformance(req, env, user, ctx) {
   const saved = await getPerformance(env, id);
   if (changed && ctx) ctx.waitUntil(warmEntities(env, saved));
   return json({ performance: saved, attendance });
+}
+
+/* ---------- show details anyone signed in can fill in ---------- */
+
+async function saveShow(req, env, user, id) {
+  const b = await req.json().catch(() => ({}));
+  const show = await env.DB.prepare("SELECT id FROM shows WHERE id = ?").bind(id).first();
+  if (!show) return fail("That show isn't in the archive.", 404);
+  const sets = [], vals = [];
+  for (const key of ["opened", "closed"]) {
+    if (b[key] === undefined) continue;
+    if (b[key] !== "" && b[key] !== null && !validDate(b[key])) return fail("That date doesn't look right.");
+    sets.push(key + " = ?"); vals.push(b[key] || null);
+  }
+  for (const key of ["theatre", "location"]) {
+    if (b[key] === undefined) continue;
+    sets.push(key + " = ?"); vals.push(text(b[key]));
+  }
+  if (sets.length) await env.DB.prepare(`UPDATE shows SET ${sets.join(", ")} WHERE id = ?`).bind(...vals, id).run();
+  return json({ show: await env.DB.prepare("SELECT id, title, theatre, location, opened, closed FROM shows WHERE id = ?").bind(id).first() });
 }
 
 /* ---------- unfinished nights ---------- */
@@ -579,6 +602,8 @@ export default {
       if (method === "POST" && path === "/scan") return scan(req, env, user);
       if (method === "POST" && path === "/parse") return parsePaste(req, env, user);
       if (method === "PUT" && path === "/drafts") return saveDraft(req, env, user);
+      const sm = path.match(/^\/shows\/([a-z0-9-]{1,80})$/);
+      if (sm && method === "PUT") return saveShow(req, env, user, sm[1]);
       const dm = path.match(/^\/drafts\/([a-f0-9]{24})$/);
       if (dm && method === "DELETE") {
         await env.DB.prepare("DELETE FROM drafts WHERE id = ? AND user_id = ?").bind(dm[1], user.id).run();
