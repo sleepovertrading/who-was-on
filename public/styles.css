@@ -165,3 +165,11 @@ details.help[open] summary::before{content:"–"}
 .nightcard.draft{border-style:dashed}
 .linkish.small{font-size:12.5px;color:var(--muted);text-decoration:underline}
 .context{font-size:14px;color:var(--muted);border-left:3px solid var(--a2);padding:4px 0 4px 12px}
+
+/* type-a-show picker */
+.picker{display:flex;flex-direction:column;gap:6px}
+.matches{display:flex;flex-direction:column;gap:4px}
+.matches:empty{display:none}
+.match{display:flex;align-items:center;gap:10px;text-align:left;background:var(--raised);border:1px solid var(--line);border-radius:12px;padding:6px 10px;cursor:pointer}
+.match:hover{border-color:var(--a2)}
+.match .tile{width:32px;height:32px;border-radius:9px;font-size:12px}

@@ -1,6 +1,6 @@
 (function(){
 "use strict";
-function blankForm(){return {showId:"",newTitle:"",theatre:"",location:"",date:"",slot:"eve",cast:[],origin:"blank",scanId:null,pages:0,seat:"",note:"",msg:"",scanMsg:"",busy:false,dateGuess:"",unsure:false,draftId:null,helpOpen:false,paste:"",pasteMsg:"",dirty:false,nearText:""};}
+function blankForm(){return {showId:"",newTitle:"",theatre:"",location:"",date:"",slot:"eve",cast:[],origin:"blank",showText:"",scanId:null,pages:0,seat:"",note:"",msg:"",scanMsg:"",busy:false,dateGuess:"",unsure:false,draftId:null,helpOpen:false,paste:"",pasteMsg:"",dirty:false,nearText:""};}
 var S={user:null,shows:new Map(),perfs:new Map(),diary:new Map(),drafts:new Map(),ready:false,fetched:new Set(),ent:new Map(),entAsked:new Set(),q:"",form:blankForm(),auth:{email:"",step:"email",msg:""}};
 var STATUSES=[["billed","As billed"],["understudy","Understudy"],["standby","Standby"],["swing","Swing"],["alternate","Alternate"]];
 var $view=document.getElementById("view"),$banner=document.getElementById("banner");
@@ -510,6 +510,7 @@ function loadCastForKey(){
     else{f.cast=[];f.origin="blank";}}
   else{f.cast=[];f.origin="blank";}
   f.scanId=null;f.pages=0;f.dirty=false;
+  f.theatreAuto=!!f.theatre;
   // A guessed cast is only a suggestion: it isn't saved unless the person chooses to use it.
   f.suggest=null;
   if(f.origin==="nearby"||f.origin==="baseline"||f.origin==="opening"){f.suggest={cast:f.cast,origin:f.origin};f.cast=[];f.origin="blank";}
@@ -553,23 +554,55 @@ function renderCastRows(){
         h("button",{type:"button",class:"btn small",text:"Use as a starting point",onclick:function(){S.form.cast=cleanCast(su.cast);S.form.origin=su.origin==="opening"?"opening":"suggested";renderCastRows();}})));}}
   [["f-theatre","theatre"],["f-location","location"]].forEach(function(x){var n=document.getElementById(x[0]); if(n&&document.activeElement!==n) n.value=S.form[x[1]];});
 }
+/* Type a show. Matches from the archive appear underneath; anything else is added as a new show. */
+function resolveShow(txt){
+  var f=S.form,t=String(txt||"").trim(),hit="";
+  if(t) S.shows.forEach(function(v,k){if(norm(v.title)===norm(t))hit=k;});
+  var next=hit||(t?"__new":""),changed=next!==f.showId||(next==="__new"&&f.newTitle!==t);
+  f.showId=next; f.newTitle=hit?"":t;
+  return changed;
+}
+function showMatches(txt){
+  var t=norm(txt); if(!t) return [];
+  return Array.from(S.shows.values()).filter(function(s){var n=norm(s.title);return n!==t&&(n.indexOf(t)===0||n.indexOf("-"+t)>=0);})
+    .sort(function(a,b){return a.title.localeCompare(b.title);}).slice(0,6);
+}
+function showPicker(){
+  var f=S.form,box=h("div",{class:"picker"}),list=h("div",{class:"matches",id:"show-matches"}),hint=h("div",{class:"muted small",id:"show-hint"});
+  function choose(s){f.showText=s.title;f.showId=s.id;f.newTitle="";loadCastForKey();render();var d=document.getElementById("f-date");if(d&&!f.date)d.focus();}
+  function paint(){
+    list.textContent="";showMatches(f.showText).forEach(function(s){
+      list.appendChild(h("button",{type:"button",class:"match",onpointerdown:function(e){e.preventDefault();choose(s);},onclick:function(){choose(s);}},tile(s.title),h("span",null,h("b",{text:s.title}),s.theatre?h("span",{class:"muted small",text:"  "+s.theatre}):null)));});
+    var known=S.shows.get(f.showId);
+    hint.textContent=known?"In the archive"+(known.theatre?" · "+known.theatre:""):f.showId==="__new"?"New to the archive. It will be added when you save.":"";
+  }
+  var input=h("input",{type:"text",id:"f-show",value:f.showText,autocomplete:"off",placeholder:"Start typing a show",
+    oninput:function(e){f.showText=e.target.value;if(resolveShow(f.showText)){if(f.showId&&f.showId!=="__new")loadCastForKey();
+        else{ // a different, unknown show: drop anything that was filled in from the previous one
+          f.suggest=null;if(f.theatreAuto){f.theatre="";f.location="";f.theatreAuto=false;}if(!f.dirty&&!f.pages)f.cast=[];}
+        renderCastRows();}paint();},
+    onblur:function(e){if(e.relatedTarget&&e.relatedTarget.classList&&e.relatedTarget.classList.contains("match"))return;render();}});
+  box.appendChild(input);box.appendChild(list);box.appendChild(hint);paint();
+  return box;
+}
 function viewAdd(){
   var f=S.form,isNew=f.showId==="__new",rekey=function(){if(!isNew&&!f.dirty&&!f.pages&&f.origin!=="draft"&&(f.origin==="archive"||!f.cast.length)){loadCastForKey();renderCastRows();}};
   formEnsure(f.showId);
-  var sel=h("select",{id:"f-show",onchange:function(e){f.showId=e.target.value;loadCastForKey();render();}});
-  sel.appendChild(h("option",{value:"",text:"Choose a show"}));
+  if(!f.showText) f.showText=isNew?f.newTitle:(S.shows.get(f.showId)||{}).title||"";
+  var sel=showPicker();
+
   var title=isNew?f.newTitle.trim():(S.shows.get(f.showId)||{}).title||"";
   var when=validDate(f.date)?fmtDate(f.date,{month:"long",year:"numeric"}):f.dateGuess.trim();
   var help=h("details",{class:"help",open:f.helpOpen,ontoggle:function(e){f.helpOpen=e.target.open;}},
     h("summary",{text:"No Playbill? Look it up, then paste the cast"}),
-    h("div",{class:"helpbody"},title?lookItUp(title,when):h("div",{class:"muted small",text:"Choose a show first and the research links appear here."}),
+    h("div",{class:"helpbody"},title?lookItUp(title,when):h("div",{class:"muted small",text:"Type a show first and the research links appear here."}),
     h("div",{class:"field"},h("label",{for:"f-paste",text:"Paste a cast list you found"}),
       h("textarea",{id:"f-paste",rows:"4",placeholder:"Copy the cast from IBDB, Wikipedia or Playbill and paste it here",oninput:function(e){f.paste=e.target.value;}},f.paste)),
     h("div",{class:"row",style:"align-items:center"},
       h("button",{type:"button",class:"btn small",disabled:f.busy,text:f.busy?"Reading…":"Fill in from this text",onclick:runPaste}),
       h("span",{class:"muted small",role:"status",text:f.pasteMsg||"Looked-up casts stay marked Unconfirmed: they show who was scheduled, not who went on."}))));
-  Array.from(S.shows.values()).sort(function(a,b){return a.title.localeCompare(b.title);}).forEach(function(s){sel.appendChild(h("option",{value:s.id,text:s.title}));});
-  sel.appendChild(h("option",{value:"__new",text:"A show that isn't listed…"})); sel.value=f.showId;
+
+
   var panel=h("form",{class:"panel",onsubmit:function(e){e.preventDefault();save();}},
     h("div",{class:"scanbox"},
       h("input",{type:"file",id:"f-scan",accept:"image/*",multiple:true,class:"hide",onchange:function(e){if(e.target.files&&e.target.files.length)runScan(Array.from(e.target.files));e.target.value="";}}),
@@ -585,10 +618,8 @@ function viewAdd(){
         h("div",{class:"seg"},
           h("input",{type:"radio",name:"slot",id:"f-mat",value:"mat",checked:f.slot==="mat",onchange:function(){f.slot="mat";rekey();}}),h("label",{for:"f-mat",text:"Matinee"}),
           h("input",{type:"radio",name:"slot",id:"f-eve",value:"eve",checked:f.slot==="eve",onchange:function(){f.slot="eve";rekey();}}),h("label",{for:"f-eve",text:"Evening"})))),
-    isNew?h("div",{class:"row"},h("div",{class:"field"},h("label",{for:"f-title",text:"Show title"}),
-      h("input",{type:"text",id:"f-title",value:f.newTitle,oninput:function(e){f.newTitle=e.target.value;}}))):null,
     h("div",{class:"row"},
-      h("div",{class:"field"},h("label",{for:"f-theatre",text:"Theatre (optional)"}),h("input",{type:"text",id:"f-theatre",value:f.theatre,placeholder:"Leave blank if you don't remember",oninput:function(e){f.theatre=e.target.value;}})),
+      h("div",{class:"field"},h("label",{for:"f-theatre",text:"Theatre (optional)"}),h("input",{type:"text",id:"f-theatre",value:f.theatre,placeholder:"Leave blank if you don't remember",oninput:function(e){f.theatre=e.target.value;f.theatreAuto=false;}})),
       h("div",{class:"field"},h("label",{for:"f-location",text:"Location (optional)"}),h("input",{type:"text",id:"f-location",value:f.location,placeholder:"New York, NY",oninput:function(e){f.location=e.target.value;}}))),
     help,
     h("div",{class:"stack",style:"gap:8px"},h("h2",{text:"Who was on"}),h("div",{class:"muted small",id:"origin",text:originText()})),
@@ -636,8 +667,8 @@ function applyScan(o,scanId,label){
   var f=S.form,cast=cleanCast(o.cast).filter(function(r){return r.role&&r.performer;}),title=String(o.show||"").trim();
   var first=f.pages===0;
   if(title&&(first||!f.showId)){var hit=null;S.shows.forEach(function(v,k){if(norm(v.title)===norm(title))hit=k;});
-    if(hit){f.showId=hit;f.theatre=S.shows.get(hit).theatre||"";f.location=S.shows.get(hit).location||"";}
-    else{f.showId="__new";f.newTitle=title.slice(0,120);}}
+    if(hit){f.showId=hit;f.showText=S.shows.get(hit).title;f.theatre=S.shows.get(hit).theatre||"";f.location=S.shows.get(hit).location||"";}
+    else{f.showId="__new";f.newTitle=title.slice(0,120);f.showText=f.newTitle;}}
   if(o.theatre&&(first||!f.theatre)) f.theatre=String(o.theatre).slice(0,120);
   if(o.location&&(first||!f.location)) f.location=String(o.location).slice(0,120);
   if(validDate(o.date)&&(first||!f.date)) f.date=o.date;
@@ -662,8 +693,8 @@ function applyScan(o,scanId,label){
 async function save(){
   var f=S.form,msg=function(t){f.msg=t;var m=document.getElementById("save-msg");if(m)m.textContent=t;};
   if(!S.user){go("sign-in");return;}
-  if(!f.showId) return msg("Choose a show first.");
-  if(f.showId==="__new"&&!f.newTitle.trim()) return msg("Type the show's title.");
+  resolveShow(f.showText);
+  if(!f.showId) return msg("Type the show first.");
   if(!validDate(f.date)) return msg("Pick the date you went.");
   var cast=cleanCast(f.cast).filter(function(r){return r.role&&r.performer;});
   var btn=document.getElementById("save-btn"); if(btn)btn.disabled=true; msg("Saving…");
@@ -680,7 +711,8 @@ async function save(){
 /* ---------- unfinished nights ---------- */
 async function saveLater(){
   var f=S.form,msg=function(t){f.msg=t;var m=document.getElementById("save-msg");if(m)m.textContent=t;};
-  if(!f.showId||(f.showId==="__new"&&!f.newTitle.trim())) return msg("Choose a show first. That's all an unfinished night needs.");
+  resolveShow(f.showText);
+  if(!f.showId) return msg("Type the show first. That's all an unfinished night needs.");
   var keepCast=true; // rows are only there if the person typed, scanned, pasted or accepted them
   try{
     var r=await send("PUT","/api/drafts",{id:f.draftId,showId:f.showId==="__new"?null:f.showId,showTitle:f.newTitle,theatre:f.theatre,location:f.location,
