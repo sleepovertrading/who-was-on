@@ -414,6 +414,18 @@ async function saveDraft(req, env, user) {
     if (show) { showId = show.id; title = show.title; }
   }
   if (!title) return fail("Choose a show, or type its title.");
+  if (!showId && slug(title)) { // a show saved without a date still joins the archive, so it gets a page, run dates and a look
+    const all = await env.DB.prepare("SELECT id, title FROM shows").all();
+    const hit = all.results.find((s) => normTitle(s.title) === normTitle(title));
+    if (hit) { showId = hit.id; title = hit.title; }
+    else {
+      const total = await env.DB.prepare("SELECT COUNT(*) AS n FROM shows WHERE created_at > datetime('now', '-1 day')").first();
+      if (total.n < 200) {
+        await env.DB.prepare("INSERT OR IGNORE INTO shows (id, title, theatre, location, source) VALUES (?, ?, ?, ?, 'user')").bind(slug(title), title, text(b.theatre), text(b.location)).run();
+        showId = slug(title);
+      }
+    }
+  }
   const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM drafts WHERE user_id = ?").bind(user.id).first();
   const id = /^[a-f0-9]{24}$/.test(b.id || "") ? b.id : randomToken(12);
   if (id !== b.id && count.n >= 300) return fail("You have a lot of unfinished nights. Finish or delete some first.", 429);

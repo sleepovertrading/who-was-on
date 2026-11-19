@@ -209,10 +209,46 @@ function statusChip(p){
   if(p.source==="opening") return h("span",{class:"chip warn",text:"Opening company"});
   return h("span",{class:"chip warn",text:"Unconfirmed"});
 }
+/* A night is drawn as a ticket stub: date block, perforation, then the title set in that show's own lettering. */
+var MONTHS=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+function showColor(title){var st=styleFor(title);return st?(lum(st.c1)>0.05?st.c1:st.c2):"hsl("+hue(norm(title))+" 70% 52%)";}
+function stubDate(date,guess){
+  if(validDate(date)){var p=date.split("-");return h("span",{class:"stubdate"},h("span",{class:"m",text:MONTHS[+p[1]-1]}),h("b",{text:String(+p[2])}),h("span",{class:"y",text:p[0]}));}
+  var yr=String(guess||"").match(/\b(19|20)\d{2}\b/);
+  return h("span",{class:"stubdate unknown"},h("span",{class:"m",text:"Date"}),h("b",{text:"?"}),h("span",{class:"y",text:yr?yr[0]:"needed"}));
+}
+function stub(href,title,date,guess,sub,right,extra){
+  var st=styleFor(title),t=h("span",{class:"t",text:title});
+  if(st){useFont(st.font);t.style.fontFamily="'"+st.font+"',var(--font)";t.classList.add("styled");}
+  var a=h(href?"a":"div",{class:"stub"+(extra?" "+extra:""),href:href||null},stubDate(date,guess),
+    h("span",{class:"main"},t,h("span",{class:"s",text:sub||""})),right?h("span",{class:"when",text:right}):null);
+  a.style.setProperty("--c",showColor(title));
+  return a;
+}
 function nightCard(p,sub){
-  return h("a",{class:"nightcard",href:"#/night/"+encodeURIComponent(p.id)},tile(p.showTitle),
-    h("span",{class:"main"},h("span",{class:"t",text:p.showTitle}),h("br"),h("span",{class:"s",text:sub||[p.theatre,p.location].filter(Boolean).join(", ")})),
-    h("span",{class:"when"},h("b",{text:fmtDate(p.date,{month:"short",day:"numeric",year:"numeric"})}),slotName(p.slot)));
+  return stub("#/night/"+encodeURIComponent(p.id),p.showTitle,p.date,"",sub||[p.theatre,p.location].filter(Boolean).join(", "),slotName(p.slot));
+}
+/* Nights grouped under large year markers. */
+function nightsByYear(perfs){
+  var box=h("div",{class:"stack"}),yr="",counts={};
+  perfs.forEach(function(p){var y=String(p.date).slice(0,4);counts[y]=(counts[y]||0)+1;});
+  perfs.forEach(function(p){var y=String(p.date).slice(0,4);
+    if(y!==yr){yr=y;box.appendChild(h("div",{class:"yearmark"},h("b",{text:y}),h("span",{text:plural(counts[y],"night","nights")})));}
+    box.appendChild(nightCard(p));});
+  return box;
+}
+function ring(done,part,total){
+  var c=2*Math.PI*34,f=function(n){return (total?n/total*c:0).toFixed(1)+" "+c.toFixed(1);},
+    box=h("span",{class:"ring",role:"img","aria-label":part+" of "+total+" nights have a cast, "+done+" checked against a Playbill"});
+  box.innerHTML='<svg viewBox="0 0 80 80" aria-hidden="true"><circle cx="40" cy="40" r="34" class="trk"/>'+(part?'<circle cx="40" cy="40" r="34" class="part" stroke-dasharray="'+f(part)+'"/>':"")+(done?'<circle cx="40" cy="40" r="34" class="done" stroke-dasharray="'+f(done)+'"/>':"")+'</svg>';
+  box.appendChild(h("b",{text:total?Math.round(part/total*100)+"%":"0%"}));
+  return box;
+}
+function faces(list,limit){
+  var box=h("div",{class:"faces"});
+  list.slice(0,limit).forEach(function(e){box.appendChild(h("a",{class:"face",href:"#/performer/"+encodeURIComponent(e.name)},avatar(e.name,true),
+    h("b",{text:e.name}),h("span",{text:plural(e.n,"night","nights")})));});
+  return box;
 }
 function nightList(perfs,empty,subFn){
   var box=h("div",{class:"stack"});
@@ -287,6 +323,12 @@ function viewMe(){
       h("p",{class:"muted",style:"margin:0;max-width:60ch",text:"Add the date you saw a show and keep the cast from that performance: principals, understudies, swings. Then follow anyone you've seen across every night in the archive."}),
       h("div",{class:"row"},h("a",{class:"btn primary",href:"#/add",text:"Add a night"}),
         S.user||S.signIn==="access"?null:h("a",{class:"btn",href:"#/sign-in",text:"Sign in"}),h("a",{class:"btn ghost",href:"#/archive",text:"Browse the archive"}))));
+    wrap.push(h("div",{class:"steps"},
+      h("div",{class:"card step"},h("b",{text:"1"}),h("h2",{text:"Log the night"}),h("p",{text:"The show and the date are enough. No date? Save the show and pin the date later."})),
+      h("div",{class:"card step"},h("b",{text:"2"}),h("h2",{text:"Fill in who was on"}),h("p",{text:"Scan your Playbill a page at a time, paste a cast list, or start from the closest night on file."})),
+      h("div",{class:"card step"},h("b",{text:"3"}),h("h2",{text:"Follow the threads"}),h("p",{text:"Every performer, show and theatre is a page: each time you saw them, and everyone they shared a stage with."}))));
+    wrap.push(h("div",{class:"demo","aria-hidden":"true"},stub(null,"Your first night","","","Scan the Playbill or type the show","Evening","tilt")));
+    wrap[wrap.length-1].firstChild.style.setProperty("--c","var(--a1)");
     wrap.push(draftsSection());
     var recent=allPerfs().slice(0,5);
     if(recent.length) wrap.push(section("Just logged",nightList(recent,""),h("a",{href:"#/archive",text:"See all"})));
@@ -294,23 +336,28 @@ function viewMe(){
   }
   wantPhotos(t.people.map(function(e){return e.name;}));
   var subs=understudyRows(mine),cross=crossovers(mine);
+  var seenShows=new Set(t.shows.map(function(x){return norm(x.p.showTitle);})),undated=0;
+  S.drafts.forEach(function(d){var k=norm(d.showTitle);if(!validDate(d.date)&&!seenShows.has(k)){seenShows.add(k);undated++;}});
+  var withCast=mine.filter(function(p){return p.cast.length;}).length,checked=mine.filter(function(p){return p.verified&&p.cast.length;}).length;
+  t.shows.filter(function(x){var v=S.shows.get(x.p.showId);return v&&!v.style;}).slice(0,3).forEach(function(x){lookUpShow(x.p.showId,x.p.date);});
   wrap.push(h("div",{class:"sechead",style:"align-items:flex-end"},
     h("div",{class:"stack"},h("div",{class:"eyebrow",text:"My shows"}),h("h1",{text:"You've seen "+plural(t.people.length,"performer","performers")+" across "+plural(mine.length,"night","nights")+"."})),
     h("button",{type:"button",class:"btn small",text:"Share my year",onclick:function(){shareYear(mine);}})));
   wrap.push(h("div",{class:"bento"},
     h("div",{class:"card stat lead"},h("b",{text:String(mine.length)}),h("span",{text:mine.length===1?"night at the theatre":"nights at the theatre"})),
-    h("div",{class:"card stat"},h("b",{text:String(t.shows.length)}),h("span",{text:t.shows.length===1?"show":"shows"})),
+    h("div",{class:"card stat"},h("b",{text:String(seenShows.size)}),h("span",{text:(seenShows.size===1?"show":"shows")+(undated?" · "+undated+" awaiting a date":"")})),
     h("div",{class:"card stat"},h("b",{text:String(t.theatres.length)}),h("span",{text:t.theatres.length===1?"theatre":"theatres"})),
+    h("div",{class:"card stat wide ringcard"},ring(checked,withCast,mine.length),h("div",null,h("span",{class:"lab",text:"Casts on file"}),
+      h("div",{class:"legend"},h("span",null,h("i",{class:"k part"}),plural(withCast,"night has","nights have")+" a cast"),h("span",null,h("i",{class:"k done"}),checked+" checked against a Playbill")))),
     h("div",{class:"card stat"},h("b",{text:String(subs.length)}),h("span",{text:subs.length===1?"understudy you saw go on":"understudies you saw go on"})),
     h("div",{class:"card stat"},h("b",{text:String(cross.length)}),h("span",{text:cross.length===1?"performer seen in more than one role":"performers seen in more than one role"})),
-    h("div",{class:"card stat wide"},h("span",{class:"lab",text:"Nights by year"}),yearChart(mine))));
+    h("div",{class:"card stat full"},h("span",{class:"lab",text:"Nights by year"}),yearChart(mine))));
   wrap.push(draftsSection());
   wrap.push(thisWeek(mine));
+  if(t.people.length) wrap.push(section("Faces you've seen most",faces(t.people,8)));
   wrap.push(h("div",{class:"grid2"},
-    section("Most seen performers",barList(performerRows(t.people,6))),
-    h("div",{class:"stack",style:"gap:26px"},
-      section("Shows you return to",barList(t.shows.slice(0,3).map(function(s){return {icon:tile(s.p.showTitle),label:linkShow(s.p),n:s.n};}))),
-      section("Your theatres",barList(t.theatres.slice(0,3).map(function(x){return {label:linkTheatre(x.name),n:x.n};}))))));
+    section("Shows you return to",barList(t.shows.slice(0,4).map(function(s){return {icon:tile(s.p.showTitle),label:linkShow(s.p),n:s.n};}))),
+    section("Your theatres",barList(t.theatres.slice(0,4).map(function(x){return {label:linkTheatre(x.name),n:x.n};})))));
   if(cross.length){var cb=h("div",{class:"card cast"});
     cross.slice(0,12).forEach(function(e){cb.appendChild(h("div",{class:"castline"},avatar(e.name),
       h("div",{class:"who"},linkPerformer(e.name),h("div",{class:"role",text:Array.from(e.parts.values()).join(" · ")})),
@@ -321,7 +368,7 @@ function viewMe(){
       h("div",{class:"who"},h("b",{text:x.r.performer}),h("div",{class:"role",text:x.r.role+" · "+x.p.showTitle+" · "+fmtDate(x.p.date,{month:"short",day:"numeric",year:"numeric"})})),
       h("span",{class:"chip warn plain",text:statusName(x.r.status)})));});
     wrap.push(section("Understudies you saw go on",ub));}
-  wrap.push(section("Your nights",nightList(mine,"")));
+  wrap.push(section("Your nights",nightsByYear(mine)));
   return wrap;
 }
 
@@ -634,7 +681,10 @@ function showPicker(){
         else{ // a different, unknown show: drop anything that was filled in from the previous one
           f.suggest=null;if(f.theatreAuto){f.theatre="";f.location="";f.theatreAuto=false;}if(!f.dirty&&!f.pages)f.cast=[];}
         renderCastRows();}paint();},
-    onblur:function(e){if(e.relatedTarget&&e.relatedTarget.classList&&e.relatedTarget.classList.contains("match"))return;render();}});
+    onblur:function(e){if(e.relatedTarget&&e.relatedTarget.classList&&e.relatedTarget.classList.contains("match"))return;
+      // Redraw a moment later, so a button being pressed right now still gets its click, and keep the cursor where it landed.
+      setTimeout(function(){if(route().kind!=="add")return;var id=(document.activeElement||{}).id;if(id==="f-show")return;render();
+        var n=id&&document.getElementById(id);if(n&&n!==document.activeElement)n.focus();},250);}});
   box.appendChild(input);box.appendChild(list);box.appendChild(hint);paint();
   return box;
 }
@@ -666,7 +716,7 @@ function viewAdd(){
       h("div",{class:"field",style:"flex:2 1 260px"},h("label",{for:"f-show",text:"Show"}),sel),
       h("div",{class:"field"},h("label",{for:"f-date",text:"Date you went"}),h("input",{type:"date",id:"f-date",value:f.date,onchange:function(e){f.date=e.target.value;rekey();render();}}),
         f.unsure?h("input",{type:"text",id:"f-guess",value:f.dateGuess,placeholder:"Roughly when? e.g. spring 2016","aria-label":"Roughly when",oninput:function(e){f.dateGuess=e.target.value;},onchange:function(){render();}})
-          :h("button",{type:"button",class:"linkish small",style:"align-self:flex-start",text:"Not sure of the date?",onclick:function(){f.unsure=true;render();var n=document.getElementById("f-guess");if(n)n.focus();}})),
+          :h("button",{type:"button",class:"linkish small",style:"align-self:flex-start",text:"Don't know the date? Save it without one",onclick:function(){f.unsure=true;render();var n=document.getElementById("f-guess");if(n)n.focus();}})),
       h("div",{class:"field",style:"flex:0 0 auto"},h("span",{class:"lab",text:"Performance"}),
         h("div",{class:"seg"},
           h("input",{type:"radio",name:"slot",id:"f-mat",value:"mat",checked:f.slot==="mat",onchange:function(){f.slot="mat";rekey();}}),h("label",{for:"f-mat",text:"Matinee"}),
@@ -683,7 +733,7 @@ function viewAdd(){
       h("div",{class:"field",style:"flex:0 1 160px"},h("label",{for:"f-seat",text:"Seat (optional)"}),h("input",{type:"text",id:"f-seat",value:f.seat,oninput:function(e){f.seat=e.target.value;}})),
       h("div",{class:"field",style:"flex:3 1 260px"},h("label",{for:"f-note",text:"Note to yourself (optional)"}),h("input",{type:"text",id:"f-note",value:f.note,oninput:function(e){f.note=e.target.value;}}))),
     h("div",{class:"row",style:"align-items:center"},
-      h("button",{type:"submit",class:"btn primary",id:"save-btn",text:S.user?"I was there. Save it":"Sign in to save"}),
+      h("button",{type:"submit",class:"btn primary",id:"save-btn",text:!S.user?"Sign in to save":f.unsure&&!validDate(f.date)?"I saw it. Save without a date":"I was there. Save it"}),
       S.user?h("button",{type:"button",class:"btn",id:"later-btn",text:"Save for later",title:"Keep what you have and finish it when you know more",onclick:saveLater}):null,
       h("span",{class:"muted small",id:"save-msg",role:"status",text:f.msg})));
   return [h("div",{class:"stack"},h("div",{class:"eyebrow",text:"Add a night"}),h("h1",{text:"Which performance did you see?"})),panel];
@@ -750,7 +800,9 @@ async function save(){
   if(!f.showId) return msg("Type the show first.");
   var dateEl=document.getElementById("f-date");
   if(dateEl&&dateEl.validity&&dateEl.validity.badInput) return msg("Finish the date: it needs the month, day and year. Not sure? Use “Not sure of the date?” and save for later.");
-  if(!validDate(f.date)) return msg("Pick the date you went.");
+  if(!validDate(f.date)){
+    if(f.unsure) return saveLater();
+    f.unsure=true;render();return msg("No date yet? Press save again to keep the show without one, and pin the date later.");}
   var cast=cleanCast(f.cast).filter(function(r){return r.role&&r.performer;});
   var btn=document.getElementById("save-btn"); if(btn)btn.disabled=true; msg("Saving…");
   try{
@@ -772,7 +824,10 @@ async function saveLater(){
   try{
     var r=await send("PUT","/api/drafts",{id:f.draftId,showId:f.showId==="__new"?null:f.showId,showTitle:f.newTitle,theatre:f.theatre,location:f.location,
       date:f.date,dateGuess:f.dateGuess,slot:f.slot,cast:keepCast?cleanCast(f.cast):[],seat:f.seat,note:f.note});
-    S.drafts.set(r.draft.id,r.draft); S.form=blankForm(); go("draft/"+r.draft.id);
+    S.drafts.set(r.draft.id,r.draft); S.form=blankForm();
+    if(r.draft.showId&&!S.shows.has(r.draft.showId)){try{(await api("/api/shows")).shows.forEach(function(v){S.shows.set(v.id,v);});}catch(e){}}
+    banner(validDate(r.draft.date)?"Saved to finish later.":r.draft.showTitle+" is on your list. Pin the date whenever you find it.");
+    go("draft/"+r.draft.id);
   }catch(e){ if(e.status===401){S.user=null;go("sign-in");return;} msg(e.message); }
 }
 function draftWhen(d){return validDate(d.date)?fmtDate(d.date,{month:"short",day:"numeric",year:"numeric"}):(d.dateGuess||"Date unknown");}
@@ -780,10 +835,10 @@ function draftNeeds(d){var n=[];if(!validDate(d.date))n.push("a date");if(!d.cas
 function draftsSection(){
   if(!S.drafts.size) return null;
   var box=h("div",{class:"stack"});
-  S.drafts.forEach(function(d){box.appendChild(h("a",{class:"nightcard draft",href:"#/draft/"+d.id},tile(d.showTitle),
-    h("span",{class:"main"},h("span",{class:"t",text:d.showTitle}),h("br"),h("span",{class:"s",text:draftNeeds(d)+(d.theatre?" · "+d.theatre:"")})),
-    h("span",{class:"when"},h("b",{text:draftWhen(d)}),"Unfinished")));});
-  return section("Needs finishing",box,h("span",{class:"muted small",text:"Only you can see these"}));
+  var nodate=0;
+  S.drafts.forEach(function(d){if(!validDate(d.date))nodate++;
+    box.appendChild(stub("#/draft/"+d.id,d.showTitle,d.date,d.dateGuess,draftNeeds(d)+(d.theatre?" · "+d.theatre:""),validDate(d.date)?"Unfinished":(d.dateGuess||"Pin the date"),"draft"));});
+  return section(nodate===S.drafts.size?"Needs a date":nodate?"Needs a date or a cast":"Needs finishing",box,h("span",{class:"muted small",text:"Only you can see these"}));
 }
 function lookItUp(title,when){
   var e=entity("show",title),q=function(t){return "https://duckduckgo.com/?q="+encodeURIComponent(t);},links=h("div",{class:"chips"});
@@ -804,17 +859,43 @@ function resumeDraft(d){
   else{loadCastForKey();if(d.theatre)S.form.theatre=d.theatre;if(d.location)S.form.location=d.location;}
   go("add");
 }
+/* Turn "I saw it, not sure when" into a real night as soon as the date turns up. */
+function pinDate(d){
+  var show=d.showId?S.shows.get(d.showId):null,long={month:"long",day:"numeric",year:"numeric"};
+  if(show) lookUpShow(d.showId,"");
+  S.pin=S.pin||{}; var st=S.pin[d.id]||(S.pin[d.id]={date:"",slot:d.slot||"eve"});
+  var run=show&&validDate(show.opened)?"Opening night was "+fmtDate(show.opened,long)+(validDate(show.closed)?" and it closed "+fmtDate(show.closed,long):"")+(show.theatre?", at "+show.theatre:"")+". Previews run a few weeks before opening.":
+    "Once the show's run is known, its opening and closing dates appear here to narrow it down.";
+  var keep=function(e){st.date=e.target.value;},msg=h("span",{class:"muted small",role:"status"});
+  var input=h("input",{type:"date",id:"pin-date",value:st.date,"aria-label":"The date you went",style:"max-width:190px",max:show&&validDate(show.closed)?show.closed:null,oninput:keep,onchange:keep});
+  var seg=h("div",{class:"seg"},
+    h("input",{type:"radio",name:"pinslot",id:"pin-mat",checked:st.slot==="mat",onchange:function(){st.slot="mat";}}),h("label",{for:"pin-mat",text:"Matinee"}),
+    h("input",{type:"radio",name:"pinslot",id:"pin-eve",checked:st.slot==="eve",onchange:function(){st.slot="eve";}}),h("label",{for:"pin-eve",text:"Evening"}));
+  var btn=h("button",{type:"button",class:"btn primary small",text:"Pin the date",onclick:async function(){
+    var val=input.value||st.date;
+    if(!validDate(val)){msg.textContent="Pick the full date first: month, day and year.";return;}
+    btn.disabled=true;msg.textContent="Saving…";
+    try{
+      var r=await send("PUT","/api/performances",{showId:d.showId||null,newTitle:d.showId?"":d.showTitle,theatre:d.theatre,location:d.location,date:val,slot:st.slot,
+        cast:cleanCast(d.cast).filter(function(x){return x.role&&x.performer;}),seat:d.seat,note:d.note});
+      S.perfs.set(r.performance.id,r.performance); if(r.attendance) S.diary.set(r.performance.id,r.attendance);
+      S.drafts.delete(d.id);delete S.pin[d.id];api("/api/drafts/"+d.id,{method:"DELETE"}).catch(function(){});
+      banner("Date pinned. It's a night now.");go("night/"+encodeURIComponent(r.performance.id));
+    }catch(e){btn.disabled=false;if(e.status===401){S.user=null;go("sign-in");return;}msg.textContent=e.message;}}});
+  return section("Pin the date",h("div",{class:"card stack"},h("div",{class:"context",text:run}),h("div",{class:"row",style:"align-items:center"},input,seg,btn,msg)));
+}
 function viewDraft(id){
   var d=S.drafts.get(id);
   if(!d) return [h("div",{class:"note",text:S.ready?"That unfinished night isn't here any more.":"Loading…"})];
   var when=validDate(d.date)?fmtDate(d.date,{month:"long",year:"numeric"}):d.dateGuess,parts=[
-    showBanner(d.showTitle,"Unfinished night · only you can see this",document.createTextNode(d.showTitle),
+    showBanner(d.showTitle,(validDate(d.date)?"Unfinished night":"Seen, date still needed")+" · only you can see this",document.createTextNode(d.showTitle),
       h("div",{class:"meta",text:[validDate(d.date)?fmtDate(d.date)+" · "+slotName(d.slot):(d.dateGuess||"Date unknown"),d.theatre].filter(Boolean).join(" · ")})),
     h("div",{class:"row",style:"align-items:center"},h("span",{class:"chip warn",text:draftNeeds(d)}),
       h("button",{type:"button",class:"btn primary small",text:"Finish this night",onclick:function(){resumeDraft(d);}}),
       h("button",{type:"button",class:"btn small ghost",text:"Delete",onclick:async function(){
         try{await api("/api/drafts/"+d.id,{method:"DELETE"});S.drafts.delete(d.id);go("");}catch(e){banner(e.message,true);}}})),
     d.note?h("div",{class:"note",text:d.note}):null,
+    validDate(d.date)?null:pinDate(d),
     section("Look it up",h("div",{class:"card"},lookItUp(d.showTitle,when)))];
   if(d.cast.length){var cast=h("div",{class:"card cast"});
     cleanCast(d.cast).forEach(function(r){cast.appendChild(h("div",{class:"castline"},avatar(r.performer),h("div",{class:"who"},linkPerformer(r.performer),h("div",{class:"role",text:r.role})),
@@ -835,6 +916,8 @@ function render(){
   renderAccount();
   var parts=r.kind==="archive"?viewArchive():r.kind==="add"?viewAdd():r.kind==="sign-in"?viewSignIn():r.kind==="night"?viewNight(r.arg):
     r.kind==="draft"?viewDraft(r.arg):r.kind==="show"?viewShow(r.arg):r.kind==="performer"?viewPerformer(r.arg):r.kind==="theatre"?viewTheatre(r.arg):viewMe();
+  var latest=S.user?allPerfs(function(p){return S.diary.has(p.id);})[0]:null;
+  document.documentElement.style.setProperty("--glow",latest?showColor(latest.showTitle):"#FF7A59");
   $view.textContent=""; parts.forEach(function(n){if(n)$view.appendChild(n);});
   if(r.kind==="add") renderCastRows();
 }
