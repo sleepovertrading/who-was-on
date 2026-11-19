@@ -90,12 +90,23 @@ function runContext(showId,date){
   return h("div",{class:"context",text:t});
 }
 function openingEditor(s){
-  var box=h("div",{class:"row",style:"align-items:center;gap:8px"}),val=s.opened||"";
-  var input=h("input",{type:"date",id:"s-opened",value:val,"aria-label":"Opening night",style:"max-width:180px",onchange:function(e){val=e.target.value;}});
-  box.appendChild(h("span",{class:"lab",text:s.opened?"Opening night":"Know the opening night?"}));box.appendChild(input);
+  // The page can redraw while someone is typing (links and photos arrive late), so the typed date is kept outside the field.
+  S.openVal=S.openVal||{};
+  var start=S.openVal[s.id]!==undefined?S.openVal[s.id]:(s.opened||"");
+  var keep=function(e){S.openVal[s.id]=e.target.value;};
+  var input=h("input",{type:"date",id:"s-opened",value:start,"aria-label":"Opening night",style:"max-width:180px",oninput:keep,onchange:keep});
+  var msg=h("span",{class:"muted small",id:"s-opened-msg",role:"status"});
+  var box=h("div",{class:"row",style:"align-items:center;gap:8px"},h("span",{class:"lab",text:s.opened?"Opening night":"Know the opening night?"}),input);
   box.appendChild(h("button",{type:"button",class:"btn small",text:"Save",onclick:async function(){
+    var val=input.value||S.openVal[s.id]||"";
     if(!S.user){go("sign-in");return;}
-    try{var r=await send("PUT","/api/shows/"+encodeURIComponent(s.id),{opened:val});S.shows.set(s.id,Object.assign({},s,r.show));S.editOpen=false;render();}catch(e){banner(e.message,true);}}}));
+    if(!validDate(val)&&!s.opened){msg.textContent="Pick the full date first: month, day and year.";return;}
+    msg.textContent="Saving…";
+    try{var r=await send("PUT","/api/shows/"+encodeURIComponent(s.id),{opened:val});
+      S.shows.set(s.id,Object.assign({},S.shows.get(s.id)||s,r.show));delete S.openVal[s.id];S.editOpen=false;
+      banner(r.show.opened?"Opening night saved: "+fmtDate(r.show.opened,{month:"long",day:"numeric",year:"numeric"})+".":"Opening night cleared.");render();}
+    catch(e){msg.textContent=e.message;}}}));
+  box.appendChild(msg);
   return box;
 }
 function monthYear(d){return fmtDate(d,{month:"short",year:"numeric"});}
@@ -325,6 +336,7 @@ function viewNight(id){
     h("div",{class:"row",style:"align-items:center"},statusChip(p),h("span",{class:"muted small",text:plural(p.edits,"edit","edits")}),acts),
     d&&(d.seat||d.note)?h("div",{class:"note",text:[d.seat?"Seat "+d.seat:"",d.note].filter(Boolean).join(" · ")}):null,
     runContext(p.showId,p.date),
+    S.shows.get(p.showId)&&!S.shows.get(p.showId).opened?openingEditor(S.shows.get(p.showId)):null,
     p.cast.length?section("Who was on",cast):section("Who was on",h("div",{class:"card stack"},
       h("div",{class:"muted",text:"No cast added yet. The show and the date are enough to log the night; add the cast whenever you like."}),
       h("div",{class:"row"},h("button",{type:"button",class:"btn primary small",text:"Add the cast",onclick:function(){editPerf(id);S.form.helpOpen=true;}})),
@@ -346,7 +358,7 @@ function viewShow(id){
     roleBox.appendChild(h("div",{class:"castline",style:"align-items:flex-start"},h("div",{class:"who",style:"flex:0 0 34%"},h("div",{style:"font-weight:700",text:e[0]})),names));});
   var meta=h("div",{class:"meta"});
   if(s.theatre) meta.appendChild(linkTheatre(s.theatre));
-  meta.appendChild(document.createTextNode([s.location?", "+s.location:"",s.opened?" · Opened "+fmtDate(s.opened,{year:"numeric",month:"long",day:"numeric"}):""].join("")));
+  meta.appendChild(document.createTextNode([s.location?", "+s.location:"",s.opened?(s.theatre||s.location?" · ":"")+"Opened "+fmtDate(s.opened,{year:"numeric",month:"long",day:"numeric"}):""].join("")));
   var nights=splitNights(perfs,"Nobody has logged a night at this show yet.");
   return [h("div",{class:"hero"},tile(s.title,true),h("div",null,h("div",{class:"eyebrow",text:"Show"}),h("h1",{text:s.title}),meta)),
     historyLine(nights.mine,"You've been"),
@@ -783,6 +795,6 @@ function render(){
   $view.textContent=""; parts.forEach(function(n){if(n)$view.appendChild(n);});
   if(r.kind==="add") renderCastRows();
 }
-window.addEventListener("hashchange",function(){window.scrollTo(0,0);render();});
+window.addEventListener("hashchange",function(){window.scrollTo(0,0);banner("");render();});
 boot();
 })();
